@@ -44,26 +44,18 @@ export async function fetchLinkPreview(rawUrl: string): Promise<LinkPreview> {
     provider,
   };
 
+  // YouTube: set a deterministic thumbnail as a baseline. The server route
+  // below may override with a higher-quality OG image if it returns one.
   if (provider === "YouTube") {
     const id = getYouTubeId(url.href);
     if (id) {
       out.thumbnail = `https://img.youtube.com/vi/${id}/hqdefault.jpg`;
-      // Try oEmbed for the title (CORS-friendly on YouTube)
-      try {
-        const r = await fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(url.href)}&format=json`);
-        if (r.ok) {
-          const data = await r.json();
-          if (data?.title) out.title = data.title;
-          if (data?.thumbnail_url) out.thumbnail = data.thumbnail_url;
-        }
-      } catch {}
-      // Fallback title if oEmbed failed
-      if (out.title === url.href) out.title = "YouTube video";
-      return out;
     }
   }
 
-  // Generic / Instagram: ask the server for Open Graph tags
+  // Always use the server route — it can fetch the page and parse
+  // og:title / og:image without browser CORS issues. Works for YouTube
+  // (real video title) and any site with Open Graph tags.
   try {
     const r = await fetch(`/api/link-preview?url=${encodeURIComponent(url.href)}`);
     if (r.ok) {
@@ -72,7 +64,10 @@ export async function fetchLinkPreview(rawUrl: string): Promise<LinkPreview> {
       if (data?.image) out.thumbnail = data.image;
     }
   } catch {}
-  if (out.title === url.href) out.title = out.domain;
+
+  if (out.title === url.href) {
+    out.title = provider === "YouTube" ? "YouTube video" : out.domain;
+  }
   return out;
 }
 
