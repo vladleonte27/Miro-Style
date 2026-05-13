@@ -20,6 +20,7 @@ You produce **one JSON object** that the user pastes into the **📋 Import** di
 - "turn this into a mindmap" / "tree this out" / "organize this"
 - A pasted block of free-form text or transcript followed by "mindmap" / "as a tree" / "organize"
 - A voice-message transcript (disfluencies + a clear topic) where the user's intent is to capture the contents on the board
+- "structure this as a YouTube video" / "YT script for X" / "video about X with retention structure" / "make a video from this voice note" — emit the **retention-driven YT** template (see §5)
 
 **Don't fire for:**
 
@@ -124,8 +125,36 @@ The same JSON schema looks different in practice depending on the kind of topic:
 - **Decision** — narrower trees. Usually 3-4 branches: Options, Criteria, Tradeoffs, Recommendation. Recommendation gets 1-2 short bullets stating the call and the reason.
 - **Diagnostic** — 4 branches typical: Symptoms (body), Hypotheses (body), Diagnostics (bullet — what to do to test), Fixes (bullet — what to do once you know).
 - **Brainstorm** — wider, shallower. 5-6 branches at depth 1; 3-5 leaves each; rarely depth 3. Leaves can be unconventional ideas — the value is breadth, not safety.
+- **YouTube video script** (retention-driven) — fires when the user says "structure this as a YT video", "video script for X", or hands you a voice note about a video idea. Use the fixed 5-branch template below. This is the highest-value request right after a voice note — recognize it.
 
 If the prompt is ambiguous about type, default to a **planning** structure with mostly body leaves — that's what users want most often.
+
+### YouTube video script template (retention-driven)
+
+Branches are exactly these five, in this order, each `style: "h2"`. No sixth branch.
+
+1. **Hook** — 1-2 `bullet` leaves. Each is a one-line cold open. The hook states the *tension*, not the answer. Never "Hi I'm…" or "In this video I'll…". Pattern interrupt first, payoff later.
+2. **Setup** — 2-3 leaves answering *what they'll learn, why now, who it's for*. These are the **sub-promises** the viewer collects throughout the video. Spread them so they pay off later.
+3. **Body** — 3-5 children, each an `h3` named for the section. Inside each `h3`, exactly three leaves in this order:
+   1. A `body` leaf stating the **main point** of the section (one sentence).
+   2. 1-2 `bullet` leaves with **B-roll / example cues** — concrete and visual ("show the spreadsheet", "cut to phone screen", "graph zoom-in").
+   3. One `bullet` leaf starting with **"Open loop:"** that teases the next section.
+4. **Payoff** — 2-3 `body` leaves: the reveal that resolves the biggest open loop, the reason it works, and the so-what for the viewer.
+5. **CTA** — 1-2 `bullet` leaves. Subscribe / watch-next / comment prompt. Always last; never mid-video.
+
+**Retention rules baked into the labels:**
+- Hook never gives the answer; it sets up a tension.
+- Every Body sub-section opens *one* loop, closed inside that section or in Payoff. Don't open a loop you don't pay off.
+- Setup sub-promises are claims you redeem inside Body. Don't promise what you don't deliver.
+- B-roll cues are concrete and visual, written as on-screen directions, not abstract concepts.
+- CTA at the end only. Mid-video CTAs kill retention.
+
+**Mapping a voice note onto this template:**
+- The "what's broken / what's interesting" the speaker opens with → Hook.
+- The "what I want viewers to walk away with" → Setup sub-promises.
+- The numbered or sequential thoughts in the middle → Body sub-sections, one `h3` each.
+- The "the lesson" / "the kicker" they say toward the end → Payoff.
+- Add a generic CTA if not specified.
 
 ## 6. Quality rules
 

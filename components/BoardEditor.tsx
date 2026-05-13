@@ -291,6 +291,8 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
   const shapesRef = useRef<Shape[]>([]);
   const edgesRef = useRef<Edge[]>([]);
   const viewportRef = useRef(viewport);
+  const selectedIdsRef = useRef<string[]>([]);
+  const multiModeRef = useRef(false);
   const historyRef = useRef<Snapshot[]>([]);
   const futureRef = useRef<Snapshot[]>([]);
   const preDragRef = useRef<Snapshot | null>(null);
@@ -300,8 +302,10 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
   useEffect(() => { shapesRef.current = shapes; }, [shapes]);
   useEffect(() => { edgesRef.current = edges; }, [edges]);
   useEffect(() => { viewportRef.current = viewport; }, [viewport]);
+  useEffect(() => { selectedIdsRef.current = selectedIds; }, [selectedIds]);
+  useEffect(() => { multiModeRef.current = multiMode; }, [multiMode]);
 
-  // Load board
+  // Load board (resets all per-board UI state when boardId changes)
   useEffect(() => {
     const b = getBoard(boardId);
     if (!b) {
@@ -312,6 +316,18 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     setShapes(b.shapes);
     setEdges(b.edges);
     setName(b.name);
+    setSelectedIds([]);
+    setSelectedEdgeId(null);
+    setEditingId(null);
+    setMode("select");
+    setEdgeFromId(null);
+    setMultiMode(false);
+    setAddOpen(false);
+    setMenuOpen(false);
+    setMarquee(null);
+    setConnectPreview(null);
+    setSnapGuides({ x: null, y: null });
+    setViewport({ tx: 0, ty: 0, scale: 1 });
     historyRef.current = [];
     futureRef.current = [];
     setHistoryVersion((v) => v + 1);
@@ -912,7 +928,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       return;
     }
     // Shift-click or multi-mode toggles membership without starting a drag.
-    if (e.shiftKey || multiMode) {
+    if (e.shiftKey || multiModeRef.current) {
       setSelectedIds((prev) =>
         prev.includes(s.id) ? prev.filter((x) => x !== s.id) : [...prev, s.id],
       );
@@ -920,10 +936,11 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       return;
     }
     // Drag the existing group if the shape is part of it; otherwise replace.
-    const dragIds = selectedIds.includes(s.id) && selectedIds.length > 1
-      ? selectedIds.slice()
+    const currentSel = selectedIdsRef.current;
+    const dragIds = currentSel.includes(s.id) && currentSel.length > 1
+      ? currentSel.slice()
       : [s.id];
-    if (!selectedIds.includes(s.id) || selectedIds.length !== 1) {
+    if (!currentSel.includes(s.id) || currentSel.length !== 1) {
       setSelectedIds(dragIds);
     }
     setSelectedEdgeId(null);
@@ -947,7 +964,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       moved: false,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editingId, mode, edgeFromId, pushHistory, snapshot, multiMode, selectedIds]);
+  }, [editingId, mode, edgeFromId, pushHistory, snapshot]);
 
   const onShapeDoubleClick = useCallback((id: string) => {
     const s = shapesRef.current.find((sh) => sh.id === id);
