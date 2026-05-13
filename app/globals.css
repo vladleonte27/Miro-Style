@@ -13,11 +13,26 @@ body {
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
   background: #f8fafc;
   color: #0f172a;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
 }
 
 .canvas-bg {
   background-color: #f8fafc;
-  background-image:
-    radial-gradient(circle, #cbd5e1 1px, transparent 1px);
+  background-image: radial-gradient(circle, #cbd5e1 1px, transparent 1px);
   background-size: 24px 24px;
+}
+
+.canvas-surface {
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* hide scrollbars in toolbar overflow areas */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+input, textarea, button {
+  font-size: 16px; /* prevents iOS auto-zoom on focus */
 }

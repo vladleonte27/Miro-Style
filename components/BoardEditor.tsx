@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -12,25 +12,30 @@ import {
 import type { Board, Edge, Shape, ShapeKind } from "@/lib/types";
 import { newId } from "@/lib/id";
 import { layoutMindmap, type MindmapNode } from "@/lib/mindmap";
-import AIMindmapDialog from "./AIMindmapDialog";
+import ImportDialog from "./ImportDialog";
 
 type Mode = "select" | "connect";
+type Corner = "nw" | "ne" | "sw" | "se";
 
 type Drag =
   | { kind: "none" }
   | { kind: "pan"; startSx: number; startSy: number; startTx: number; startTy: number }
   | { kind: "move"; id: string; startSx: number; startSy: number; origX: number; origY: number; scale: number; moved: boolean }
-  | { kind: "resize"; id: string; corner: "nw" | "ne" | "sw" | "se"; orig: Shape; startSx: number; startSy: number; scale: number };
+  | { kind: "resize"; id: string; corner: Corner; orig: Shape; startSx: number; startSy: number; scale: number }
+  | { kind: "pinch"; initialDist: number; initialScale: number; initialTx: number; initialTy: number; centerSx: number; centerSy: number };
 
 const DEFAULTS: Record<ShapeKind, Pick<Shape, "w" | "h" | "fill" | "stroke">> = {
-  rect: { w: 160, h: 90, fill: "#fef3c7", stroke: "#1f2937" },
-  ellipse: { w: 160, h: 90, fill: "#dbeafe", stroke: "#1f2937" },
-  diamond: { w: 140, h: 120, fill: "#dcfce7", stroke: "#1f2937" },
-  text: { w: 220, h: 40, fill: "transparent", stroke: "transparent" },
+  rect: { w: 160, h: 96, fill: "#fef3c7", stroke: "#1f2937" },
+  ellipse: { w: 160, h: 96, fill: "#dbeafe", stroke: "#1f2937" },
+  diamond: { w: 144, h: 124, fill: "#dcfce7", stroke: "#1f2937" },
+  text: { w: 220, h: 44, fill: "transparent", stroke: "transparent" },
 };
 
 const SWATCHES = ["#fef3c7", "#dbeafe", "#dcfce7", "#fbcfe8", "#ddd6fe", "#fed7aa", "#fecaca", "#ffffff"];
 
+function clamp(v: number, lo: number, hi: number) {
+  return Math.max(lo, Math.min(hi, v));
+}
 function shapeCenter(s: Shape) {
   return { x: s.x + s.w / 2, y: s.y + s.h / 2 };
 }
@@ -45,13 +50,16 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
   const [mode, setMode] = useState<Mode>("select");
   const [edgeFromId, setEdgeFromId] = useState<string | null>(null);
   const [viewport, setViewport] = useState({ tx: 0, ty: 0, scale: 1 });
-  const [aiOpen, setAiOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
   const [name, setName] = useState("");
 
   const svgRef = useRef<SVGSVGElement | null>(null);
   const dragRef = useRef<Drag>({ kind: "none" });
+  const pointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
 
-  // ---- Load board ----
+  // Load board
   useEffect(() => {
     const b = getBoard(boardId);
     if (!b) {
@@ -64,7 +72,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     setName(b.name);
   }, [boardId]);
 
-  // ---- Auto-save (debounced) ----
+  // Auto-save
   useEffect(() => {
     if (!board) return;
     const t = setTimeout(() => {
@@ -73,7 +81,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     return () => clearTimeout(t);
   }, [board, name, shapes, edges]);
 
-  // ---- Wheel zoom (non-passive) ----
+  // Wheel zoom (desktop)
   useEffect(() => {
     const svg = svgRef.current;
     if (!svg) return;
@@ -84,7 +92,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       const sy = e.clientY - rect.top;
       setViewport((v) => {
         const factor = e.deltaY > 0 ? 1 / 1.1 : 1.1;
-        const scale = Math.max(0.15, Math.min(4, v.scale * factor));
+        const scale = clamp(v.scale * factor, 0.15, 4);
         const bx = (sx - v.tx) / v.scale;
         const by = (sy - v.ty) / v.scale;
         return { scale, tx: sx - bx * scale, ty: sy - by * scale };
@@ -94,28 +102,44 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     return () => svg.removeEventListener("wheel", onWheel);
   }, []);
 
-  // ---- Window-level mouse move/up for drag ----
+  // Global pointer move/up for drags + pinch
   useEffect(() => {
-    function onMove(e: MouseEvent) {
+    function onMove(e: PointerEvent) {
       const d = dragRef.current;
+      if (d.kind === "none") return;
       const svg = svgRef.current;
-      if (!svg || d.kind === "none") return;
+      if (!svg) return;
+      if (pointersRef.current.has(e.pointerId)) {
+        pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      }
       const rect = svg.getBoundingClientRect();
       const sx = e.clientX - rect.left;
       const sy = e.clientY - rect.top;
 
+      if (d.kind === "pinch") {
+        const pts = [...pointersRef.current.values()].slice(0, 2);
+        if (pts.length < 2) return;
+        const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+        const mx = (pts[0].x + pts[1].x) / 2 - rect.left;
+        const my = (pts[0].y + pts[1].y) / 2 - rect.top;
+        const scale = clamp(d.initialScale * (dist / d.initialDist), 0.15, 4);
+        const bx = (d.centerSx - d.initialTx) / d.initialScale;
+        const by = (d.centerSy - d.initialTy) / d.initialScale;
+        setViewport({ scale, tx: mx - bx * scale, ty: my - by * scale });
+        return;
+      }
       if (d.kind === "pan") {
-        const dx = sx - d.startSx;
-        const dy = sy - d.startSy;
-        setViewport((v) => ({ ...v, tx: d.startTx + dx, ty: d.startTy + dy }));
-      } else if (d.kind === "move") {
+        setViewport((v) => ({ ...v, tx: d.startTx + (sx - d.startSx), ty: d.startTy + (sy - d.startSy) }));
+        return;
+      }
+      if (d.kind === "move") {
         const dx = (sx - d.startSx) / d.scale;
         const dy = (sy - d.startSy) / d.scale;
         if (Math.abs(dx) + Math.abs(dy) > 1) d.moved = true;
-        setShapes((ss) =>
-          ss.map((s) => (s.id === d.id ? { ...s, x: d.origX + dx, y: d.origY + dy } : s)),
-        );
-      } else if (d.kind === "resize") {
+        setShapes((ss) => ss.map((s) => (s.id === d.id ? { ...s, x: d.origX + dx, y: d.origY + dy } : s)));
+        return;
+      }
+      if (d.kind === "resize") {
         const dx = (sx - d.startSx) / d.scale;
         const dy = (sy - d.startSy) / d.scale;
         setShapes((ss) =>
@@ -127,23 +151,31 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
             if (d.corner === "ne") { ny = o.y + dy; nh = o.h - dy; nw = o.w + dx; }
             if (d.corner === "sw") { nx = o.x + dx; nw = o.w - dx; nh = o.h + dy; }
             if (d.corner === "nw") { nx = o.x + dx; ny = o.y + dy; nw = o.w - dx; nh = o.h - dy; }
-            return { ...s, x: nx, y: ny, w: Math.max(30, nw), h: Math.max(24, nh) };
+            return { ...s, x: nx, y: ny, w: Math.max(40, nw), h: Math.max(32, nh) };
           }),
         );
       }
     }
-    function onUp() {
-      dragRef.current = { kind: "none" };
+    function onEnd(e: PointerEvent) {
+      pointersRef.current.delete(e.pointerId);
+      const d = dragRef.current;
+      if (d.kind === "pinch" && pointersRef.current.size < 2) {
+        dragRef.current = { kind: "none" };
+      } else if (pointersRef.current.size === 0) {
+        dragRef.current = { kind: "none" };
+      }
     }
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onEnd);
+    window.addEventListener("pointercancel", onEnd);
     return () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onEnd);
+      window.removeEventListener("pointercancel", onEnd);
     };
   }, []);
 
-  // ---- Keyboard ----
+  // Keyboard (desktop only — phones use inspector buttons)
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (editingId) return;
@@ -151,9 +183,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       if (tag === "INPUT" || tag === "TEXTAREA") return;
       if ((e.key === "Delete" || e.key === "Backspace") && selectedId) {
         e.preventDefault();
-        setShapes((s) => s.filter((x) => x.id !== selectedId));
-        setEdges((es) => es.filter((x) => x.from !== selectedId && x.to !== selectedId));
-        setSelectedId(null);
+        deleteShape(selectedId);
       } else if (e.key === "Escape") {
         setMode("select");
         setEdgeFromId(null);
@@ -162,21 +192,36 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId, editingId]);
 
-  // ---- Helpers ----
-  function screenToBoard(clientX: number, clientY: number) {
-    const svg = svgRef.current!;
-    const rect = svg.getBoundingClientRect();
-    const sx = clientX - rect.left;
-    const sy = clientY - rect.top;
-    return { x: (sx - viewport.tx) / viewport.scale, y: (sy - viewport.ty) / viewport.scale };
+  function deleteShape(id: string) {
+    setShapes((s) => s.filter((x) => x.id !== id));
+    setEdges((es) => es.filter((x) => x.from !== id && x.to !== id));
+    if (selectedId === id) setSelectedId(null);
+  }
+
+  function trySwitchToPinch(): boolean {
+    if (pointersRef.current.size < 2) return false;
+    const pts = [...pointersRef.current.values()].slice(0, 2);
+    const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+    const rect = svgRef.current!.getBoundingClientRect();
+    const centerSx = (pts[0].x + pts[1].x) / 2 - rect.left;
+    const centerSy = (pts[0].y + pts[1].y) / 2 - rect.top;
+    dragRef.current = {
+      kind: "pinch",
+      initialDist: dist,
+      initialScale: viewport.scale,
+      initialTx: viewport.tx,
+      initialTy: viewport.ty,
+      centerSx,
+      centerSy,
+    };
+    return true;
   }
 
   function addShape(kind: ShapeKind) {
-    const svg = svgRef.current!;
-    const rect = svg.getBoundingClientRect();
-    // place at center of current view
+    const rect = svgRef.current!.getBoundingClientRect();
     const cx = (rect.width / 2 - viewport.tx) / viewport.scale;
     const cy = (rect.height / 2 - viewport.ty) / viewport.scale;
     const d = DEFAULTS[kind];
@@ -193,16 +238,19 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     };
     setShapes((ss) => [...ss, s]);
     setSelectedId(s.id);
+    setAddOpen(false);
   }
 
-  function onShapeMouseDown(e: React.MouseEvent, s: Shape) {
+  function onShapePointerDown(e: React.PointerEvent, s: Shape) {
     e.stopPropagation();
     if (editingId) return;
+    pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (trySwitchToPinch()) return;
+
     if (mode === "connect") {
       if (!edgeFromId) {
         setEdgeFromId(s.id);
       } else if (edgeFromId !== s.id) {
-        // create edge if not duplicate
         setEdges((es) =>
           es.some((x) => x.from === edgeFromId && x.to === s.id)
             ? es
@@ -214,11 +262,12 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       return;
     }
     setSelectedId(s.id);
+    const rect = svgRef.current!.getBoundingClientRect();
     dragRef.current = {
       kind: "move",
       id: s.id,
-      startSx: e.clientX - svgRef.current!.getBoundingClientRect().left,
-      startSy: e.clientY - svgRef.current!.getBoundingClientRect().top,
+      startSx: e.clientX - rect.left,
+      startSy: e.clientY - rect.top,
       origX: s.x,
       origY: s.y,
       scale: viewport.scale,
@@ -226,9 +275,14 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     };
   }
 
-  function onCanvasMouseDown(e: React.MouseEvent) {
+  function onCanvasPointerDown(e: React.PointerEvent) {
     if (editingId) return;
+    pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (trySwitchToPinch()) return;
+
     setSelectedId(null);
+    setAddOpen(false);
+    setMenuOpen(false);
     if (mode === "connect") {
       setEdgeFromId(null);
       setMode("select");
@@ -244,8 +298,10 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     };
   }
 
-  function onHandleMouseDown(e: React.MouseEvent, s: Shape, corner: "nw" | "ne" | "sw" | "se") {
+  function onHandlePointerDown(e: React.PointerEvent, s: Shape, corner: Corner) {
     e.stopPropagation();
+    pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (trySwitchToPinch()) return;
     const rect = svgRef.current!.getBoundingClientRect();
     dragRef.current = {
       kind: "resize",
@@ -264,20 +320,16 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
 
   function applyMindmap(root: MindmapNode) {
     const { shapes: ms, edges: me } = layoutMindmap(root);
-    // place at viewport center
-    const svg = svgRef.current!;
-    const rect = svg.getBoundingClientRect();
+    const rect = svgRef.current!.getBoundingClientRect();
     const cx = (rect.width / 2 - viewport.tx) / viewport.scale;
     const cy = (rect.height / 2 - viewport.ty) / viewport.scale;
-    // compute bounds of the laid out shapes
     const minX = Math.min(...ms.map((s) => s.x));
     const maxX = Math.max(...ms.map((s) => s.x + s.w));
     const minY = Math.min(...ms.map((s) => s.y));
     const maxY = Math.max(...ms.map((s) => s.y + s.h));
     const dx = cx - (minX + maxX) / 2;
     const dy = cy - (minY + maxY) / 2;
-    const offsetted = ms.map((s) => ({ ...s, x: s.x + dx, y: s.y + dy }));
-    setShapes((ss) => [...ss, ...offsetted]);
+    setShapes((ss) => [...ss, ...ms.map((s) => ({ ...s, x: s.x + dx, y: s.y + dy }))]);
     setEdges((es) => [...es, ...me]);
   }
 
@@ -289,10 +341,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     }
   }
 
-  // ---- Render states ----
-  if (board === undefined) {
-    return <div className="p-8 text-slate-500">Loading…</div>;
-  }
+  if (board === undefined) return <div className="p-8 text-slate-500">Loading…</div>;
   if (board === null) {
     return (
       <div className="p-8">
@@ -306,50 +355,54 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
   const editing = shapes.find((s) => s.id === editingId) ?? null;
 
   return (
-    <div className="h-screen flex flex-col">
-      {/* Top bar */}
-      <header className="flex items-center gap-3 px-4 py-2 border-b bg-white">
-        <Link href="/" className="text-sm text-slate-500 hover:text-slate-900">
-          ← Boards
+    <div className="flex flex-col" style={{ height: "100dvh" }}>
+      {/* Header */}
+      <header
+        className="flex items-center gap-2 px-2 sm:px-4 py-2 border-b bg-white"
+        style={{ paddingTop: "max(8px, env(safe-area-inset-top))" }}
+      >
+        <Link
+          href="/"
+          className="px-3 py-2 text-slate-600 hover:bg-slate-100 rounded-lg text-lg leading-none"
+          aria-label="Back to boards"
+        >
+          ←
         </Link>
         <input
           value={name}
           onChange={(e) => setName(e.target.value)}
           onBlur={() => board && renameBoard(board.id, name)}
-          className="text-sm font-medium px-2 py-1 rounded hover:bg-slate-100 focus:bg-slate-100 focus:outline-none w-64"
+          className="flex-1 min-w-0 text-sm font-medium px-2 py-2 rounded hover:bg-slate-100 focus:bg-slate-100 focus:outline-none"
         />
-        <div className="flex-1" />
-
-        <Toolbar
-          mode={mode}
-          onMode={setMode}
-          onAdd={addShape}
-          onAI={() => setAiOpen(true)}
-        />
-
-        <div className="w-px h-6 bg-slate-200 mx-1" />
-        <button
-          onClick={onDeleteBoard}
-          className="text-xs text-red-600 hover:text-red-800 px-2 py-1"
-          title="Delete board"
-        >
-          Delete board
-        </button>
+        <div className="relative">
+          <button
+            onClick={() => setMenuOpen((v) => !v)}
+            className="px-3 py-2 text-slate-600 hover:bg-slate-100 rounded-lg text-xl leading-none"
+            aria-label="Board menu"
+          >
+            ⋮
+          </button>
+          {menuOpen && (
+            <div className="absolute right-0 top-full mt-1 bg-white border shadow-lg rounded-lg py-1 w-44 z-30">
+              <button
+                onClick={() => { setMenuOpen(false); onDeleteBoard(); }}
+                className="block w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50"
+              >
+                Delete board
+              </button>
+            </div>
+          )}
+        </div>
       </header>
 
       {/* Canvas */}
       <div className="relative flex-1 overflow-hidden canvas-bg">
         <svg
           ref={svgRef}
-          className="absolute inset-0 w-full h-full cursor-default"
-          onMouseDown={onCanvasMouseDown}
-          onDoubleClick={(e) => {
-            // double-click on background does nothing; shape handles its own dbl-click
-            e.stopPropagation();
-          }}
+          className="canvas-surface absolute inset-0 w-full h-full"
+          onPointerDown={onCanvasPointerDown}
         >
           <g transform={`translate(${viewport.tx} ${viewport.ty}) scale(${viewport.scale})`}>
-            {/* Edges first so shapes paint on top */}
             {edges.map((e) => {
               const a = shapes.find((s) => s.id === e.from);
               const b = shapes.find((s) => s.id === e.to);
@@ -365,137 +418,112 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
                   y2={p2.y}
                   stroke="#475569"
                   strokeWidth={2}
+                  vectorEffect="non-scaling-stroke"
                 />
               );
             })}
 
-            {/* Shapes */}
             {shapes.map((s) => (
               <ShapeNode
                 key={s.id}
                 shape={s}
                 selected={s.id === selectedId}
                 connectSource={s.id === edgeFromId}
-                onMouseDown={(e) => onShapeMouseDown(e, s)}
-                onDoubleClick={(e) => {
-                  e.stopPropagation();
+                onPointerDown={(e) => onShapePointerDown(e, s)}
+                onDoubleClick={() => {
                   setEditingId(s.id);
                   setSelectedId(s.id);
                 }}
               />
             ))}
 
-            {/* Resize handles for selected shape */}
             {selected && !editing && (
               <ResizeHandles
                 shape={selected}
                 scale={viewport.scale}
-                onHandle={(corner, e) => onHandleMouseDown(e, selected, corner)}
+                onHandle={(corner, e) => onHandlePointerDown(e, selected, corner)}
               />
             )}
           </g>
         </svg>
 
-        {/* Text-edit overlay */}
+        {/* Text edit overlay */}
         {editing && (
-          <TextEditOverlay
-            shape={editing}
-            viewport={viewport}
-            onChange={(text) => updateShape(editing.id, { text })}
-            onDone={() => setEditingId(null)}
-          />
-        )}
-
-        {/* Inspector for selected shape */}
-        {selected && !editing && (
-          <Inspector
-            shape={selected}
-            onChange={(patch) => updateShape(selected.id, patch)}
-            onDelete={() => {
-              setShapes((s) => s.filter((x) => x.id !== selected.id));
-              setEdges((es) => es.filter((x) => x.from !== selected.id && x.to !== selected.id));
-              setSelectedId(null);
-            }}
-            onEditText={() => setEditingId(selected.id)}
-          />
+          <>
+            <TextEditOverlay
+              shape={editing}
+              viewport={viewport}
+              onChange={(text) => updateShape(editing.id, { text })}
+              onDone={() => setEditingId(null)}
+            />
+            <button
+              onClick={() => setEditingId(null)}
+              className="absolute top-2 left-1/2 -translate-x-1/2 bg-slate-900 text-white px-4 py-2 rounded-full shadow-lg z-30 text-sm font-medium"
+            >
+              Done ✓
+            </button>
+          </>
         )}
 
         {/* Mode hint */}
         {mode === "connect" && (
-          <div className="absolute top-3 left-1/2 -translate-x-1/2 bg-slate-900 text-white text-xs px-3 py-1.5 rounded-full shadow">
-            {edgeFromId ? "Click a target shape" : "Click the source shape (Esc to cancel)"}
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 bg-slate-900 text-white text-xs px-3 py-2 rounded-full shadow z-10 pointer-events-none">
+            {edgeFromId ? "Tap a target shape" : "Tap source, then target"}
           </div>
+        )}
+
+        {/* Bottom UI: inspector OR toolbar */}
+        {selected && !editing ? (
+          <Inspector
+            shape={selected}
+            onChange={(patch) => updateShape(selected.id, patch)}
+            onDelete={() => deleteShape(selected.id)}
+            onEditText={() => setEditingId(selected.id)}
+          />
+        ) : (
+          !editing && (
+            <BottomToolbar
+              mode={mode}
+              addOpen={addOpen}
+              onToggleAdd={() => setAddOpen((v) => !v)}
+              onAdd={addShape}
+              onToggleConnect={() => setMode((m) => (m === "connect" ? "select" : "connect"))}
+              onImport={() => setImportOpen(true)}
+            />
+          )
         )}
       </div>
 
-      <AIMindmapDialog
-        open={aiOpen}
-        onClose={() => setAiOpen(false)}
-        onGenerated={applyMindmap}
+      <ImportDialog
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        onImport={applyMindmap}
       />
     </div>
   );
 }
 
-// ---------- Sub-components ----------
-
-function Toolbar({
-  mode,
-  onMode,
-  onAdd,
-  onAI,
-}: {
-  mode: Mode;
-  onMode: (m: Mode) => void;
-  onAdd: (k: ShapeKind) => void;
-  onAI: () => void;
-}) {
-  const btn = "px-2.5 py-1 text-xs rounded-md hover:bg-slate-100 border border-transparent";
-  return (
-    <div className="flex items-center gap-1">
-      <button onClick={() => onAdd("rect")} className={btn} title="Rectangle">▭ Rect</button>
-      <button onClick={() => onAdd("ellipse")} className={btn} title="Ellipse">◯ Ellipse</button>
-      <button onClick={() => onAdd("diamond")} className={btn} title="Diamond">◇ Diamond</button>
-      <button onClick={() => onAdd("text")} className={btn} title="Text">T Text</button>
-      <div className="w-px h-5 bg-slate-200 mx-1" />
-      <button
-        onClick={() => onMode(mode === "connect" ? "select" : "connect")}
-        className={`${btn} ${mode === "connect" ? "bg-slate-900 text-white hover:bg-slate-800" : ""}`}
-        title="Connect shapes with edges"
-      >
-        ↔ Connect
-      </button>
-      <div className="w-px h-5 bg-slate-200 mx-1" />
-      <button
-        onClick={onAI}
-        className="px-3 py-1 text-xs rounded-md bg-indigo-600 text-white hover:bg-indigo-700"
-        title="Generate mindmap with AI"
-      >
-        ✨ AI Mindmap
-      </button>
-    </div>
-  );
-}
+// ---------- sub-components ----------
 
 function ShapeNode({
   shape,
   selected,
   connectSource,
-  onMouseDown,
+  onPointerDown,
   onDoubleClick,
 }: {
   shape: Shape;
   selected: boolean;
   connectSource: boolean;
-  onMouseDown: (e: React.MouseEvent) => void;
-  onDoubleClick: (e: React.MouseEvent) => void;
+  onPointerDown: (e: React.PointerEvent) => void;
+  onDoubleClick: () => void;
 }) {
   const strokeColor = connectSource ? "#6366f1" : selected ? "#0ea5e9" : shape.stroke;
   const strokeW = selected || connectSource ? 2.5 : 1.5;
-  const common = {
-    onMouseDown,
+  const handlers = {
+    onPointerDown,
     onDoubleClick,
-    style: { cursor: "move" as const },
+    style: { cursor: "move" as const, touchAction: "none" as const },
   };
 
   let geometry: React.ReactNode;
@@ -506,12 +534,13 @@ function ShapeNode({
         y={shape.y}
         width={shape.w}
         height={shape.h}
-        rx={8}
-        ry={8}
+        rx={10}
+        ry={10}
         fill={shape.fill}
         stroke={strokeColor}
         strokeWidth={strokeW}
-        {...common}
+        vectorEffect="non-scaling-stroke"
+        {...handlers}
       />
     );
   } else if (shape.kind === "ellipse") {
@@ -524,7 +553,8 @@ function ShapeNode({
         fill={shape.fill}
         stroke={strokeColor}
         strokeWidth={strokeW}
-        {...common}
+        vectorEffect="non-scaling-stroke"
+        {...handlers}
       />
     );
   } else if (shape.kind === "diamond") {
@@ -535,10 +565,16 @@ function ShapeNode({
       `${shape.x},${shape.y + shape.h / 2}`,
     ].join(" ");
     geometry = (
-      <polygon points={pts} fill={shape.fill} stroke={strokeColor} strokeWidth={strokeW} {...common} />
+      <polygon
+        points={pts}
+        fill={shape.fill}
+        stroke={strokeColor}
+        strokeWidth={strokeW}
+        vectorEffect="non-scaling-stroke"
+        {...handlers}
+      />
     );
   } else {
-    // text shape: invisible rect for hit-testing + selection outline
     geometry = (
       <rect
         x={shape.x}
@@ -549,7 +585,8 @@ function ShapeNode({
         stroke={selected || connectSource ? strokeColor : "transparent"}
         strokeDasharray={selected ? "4 4" : undefined}
         strokeWidth={1.5}
-        {...common}
+        vectorEffect="non-scaling-stroke"
+        {...handlers}
       />
     );
   }
@@ -596,11 +633,11 @@ function ResizeHandles({
 }: {
   shape: Shape;
   scale: number;
-  onHandle: (corner: "nw" | "ne" | "sw" | "se", e: React.MouseEvent) => void;
+  onHandle: (corner: Corner, e: React.PointerEvent) => void;
 }) {
-  const size = 8 / scale;
-  const half = size / 2;
-  const corners: { key: "nw" | "ne" | "sw" | "se"; x: number; y: number; cursor: string }[] = [
+  const vis = 9 / scale;
+  const hit = 28 / scale;
+  const corners: { key: Corner; x: number; y: number; cursor: string }[] = [
     { key: "nw", x: shape.x, y: shape.y, cursor: "nwse-resize" },
     { key: "ne", x: shape.x + shape.w, y: shape.y, cursor: "nesw-resize" },
     { key: "sw", x: shape.x, y: shape.y + shape.h, cursor: "nesw-resize" },
@@ -609,18 +646,28 @@ function ResizeHandles({
   return (
     <>
       {corners.map((c) => (
-        <rect
-          key={c.key}
-          x={c.x - half}
-          y={c.y - half}
-          width={size}
-          height={size}
-          fill="#ffffff"
-          stroke="#0ea5e9"
-          strokeWidth={1.5 / scale}
-          style={{ cursor: c.cursor }}
-          onMouseDown={(e) => onHandle(c.key, e)}
-        />
+        <g key={c.key}>
+          <rect
+            x={c.x - hit / 2}
+            y={c.y - hit / 2}
+            width={hit}
+            height={hit}
+            fill="transparent"
+            style={{ cursor: c.cursor, touchAction: "none" }}
+            onPointerDown={(e) => onHandle(c.key, e)}
+          />
+          <rect
+            x={c.x - vis / 2}
+            y={c.y - vis / 2}
+            width={vis}
+            height={vis}
+            fill="#ffffff"
+            stroke="#0ea5e9"
+            strokeWidth={1.5}
+            vectorEffect="non-scaling-stroke"
+            pointerEvents="none"
+          />
+        </g>
       ))}
     </>
   );
@@ -649,7 +696,10 @@ function TextEditOverlay({
       onChange={(e) => onChange(e.target.value)}
       onBlur={onDone}
       onKeyDown={(e) => {
-        if (e.key === "Escape" || (e.key === "Enter" && !e.shiftKey)) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          onDone();
+        } else if (e.key === "Enter" && !e.shiftKey) {
           e.preventDefault();
           onDone();
         }
@@ -659,20 +709,91 @@ function TextEditOverlay({
         left,
         top,
         width,
-        height,
+        height: Math.max(height, 44),
         padding: 8,
         boxSizing: "border-box",
         textAlign: "center",
-        fontSize: (shape.kind === "text" ? 18 : 14) * viewport.scale,
+        fontSize: Math.max(14, (shape.kind === "text" ? 18 : 14) * viewport.scale),
         fontWeight: shape.kind === "text" ? 500 : 400,
         lineHeight: 1.25,
         border: "2px solid #0ea5e9",
-        borderRadius: 6,
+        borderRadius: 8,
         background: "white",
         resize: "none",
         outline: "none",
+        zIndex: 20,
       }}
     />
+  );
+}
+
+function BottomToolbar({
+  mode,
+  addOpen,
+  onToggleAdd,
+  onAdd,
+  onToggleConnect,
+  onImport,
+}: {
+  mode: Mode;
+  addOpen: boolean;
+  onToggleAdd: () => void;
+  onAdd: (k: ShapeKind) => void;
+  onToggleConnect: () => void;
+  onImport: () => void;
+}) {
+  return (
+    <div
+      className="absolute left-0 right-0 bottom-0 px-2 pointer-events-none z-10"
+      style={{ paddingBottom: "max(8px, env(safe-area-inset-bottom))" }}
+    >
+      <div className="flex justify-center">
+        <div className="pointer-events-auto bg-white border shadow-lg rounded-2xl p-1.5 flex items-center gap-1">
+          <div className="relative">
+            <button
+              onClick={onToggleAdd}
+              className={`px-3 h-11 min-w-11 rounded-xl text-sm font-medium ${addOpen ? "bg-slate-900 text-white" : "hover:bg-slate-100"}`}
+              aria-expanded={addOpen}
+            >
+              + Shape
+            </button>
+            {addOpen && (
+              <div className="absolute bottom-full mb-2 left-0 bg-white border shadow-lg rounded-xl p-1 flex flex-col w-44 z-20">
+                {(
+                  [
+                    ["rect", "▭  Rectangle"],
+                    ["ellipse", "◯  Ellipse"],
+                    ["diamond", "◇  Diamond"],
+                    ["text", "T  Text"],
+                  ] as const
+                ).map(([k, label]) => (
+                  <button
+                    key={k}
+                    onClick={() => onAdd(k)}
+                    className="px-3 h-11 text-left rounded-lg hover:bg-slate-100 text-sm"
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <button
+            onClick={onToggleConnect}
+            className={`px-3 h-11 min-w-11 rounded-xl text-sm font-medium ${mode === "connect" ? "bg-slate-900 text-white" : "hover:bg-slate-100"}`}
+            aria-pressed={mode === "connect"}
+          >
+            ↔ Connect
+          </button>
+          <button
+            onClick={onImport}
+            className="px-3 h-11 min-w-11 rounded-xl text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-700"
+          >
+            📋 Import
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -688,31 +809,39 @@ function Inspector({
   onEditText: () => void;
 }) {
   return (
-    <div className="absolute right-3 top-3 bg-white rounded-lg shadow-md border p-3 w-56 text-sm">
-      <div className="text-xs uppercase tracking-wide text-slate-400 mb-2">Shape</div>
-      <div className="flex flex-wrap gap-1.5 mb-3">
-        {SWATCHES.map((c) => (
+    <div
+      className="absolute left-2 right-2 bottom-0 z-10 pointer-events-none"
+      style={{ paddingBottom: "max(8px, env(safe-area-inset-bottom))" }}
+    >
+      <div className="flex justify-center">
+        <div className="pointer-events-auto bg-white border shadow-lg rounded-2xl p-3 w-full max-w-md flex items-center gap-3">
+          <div className="flex flex-wrap gap-1.5 flex-1">
+            {SWATCHES.map((c) => (
+              <button
+                key={c}
+                onClick={() => onChange({ fill: c })}
+                className={`w-8 h-8 rounded-full border ${shape.fill === c ? "ring-2 ring-slate-900 ring-offset-1" : ""}`}
+                style={{ background: c }}
+                aria-label={`Fill ${c}`}
+              />
+            ))}
+          </div>
           <button
-            key={c}
-            onClick={() => onChange({ fill: c })}
-            className={`w-6 h-6 rounded border ${shape.fill === c ? "ring-2 ring-slate-900" : ""}`}
-            style={{ background: c }}
-            title={c}
-          />
-        ))}
+            onClick={onEditText}
+            className="px-3 h-11 rounded-xl hover:bg-slate-100 text-sm"
+            aria-label="Edit text"
+          >
+            ✎
+          </button>
+          <button
+            onClick={onDelete}
+            className="px-3 h-11 rounded-xl hover:bg-red-50 text-red-600 text-sm"
+            aria-label="Delete shape"
+          >
+            🗑
+          </button>
+        </div>
       </div>
-      <button
-        onClick={onEditText}
-        className="w-full text-left px-2 py-1.5 rounded hover:bg-slate-100 text-xs"
-      >
-        ✎ Edit text
-      </button>
-      <button
-        onClick={onDelete}
-        className="w-full text-left px-2 py-1.5 rounded hover:bg-red-50 text-red-600 text-xs"
-      >
-        🗑 Delete
-      </button>
     </div>
   );
 }
