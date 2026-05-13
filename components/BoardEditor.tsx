@@ -388,23 +388,31 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     setHistoryVersion((v) => v + 1);
   }, [snapshot]);
 
-  // Wheel zoom — listener lives on `window` so it can't be missed by any
-  // child element's event handling. We then gate by:
-  //   - target must be inside the canvas container (so the page chrome /
-  //     boards list isn't hijacked when this component is on screen)
-  //   - target must NOT be inside an input / textarea / contenteditable
-  //     (so the import-dialog textarea, the inline text editor, and the
-  //     board-name input still scroll naturally).
+  // Wheel zoom — last-resort version. Listener at the window level in the
+  // CAPTURE phase so it runs before anything else (browser extensions,
+  // React synthetic system, child handlers). preventDefault + stop-immediate
+  // so the page can't scroll out from under it. Skips only inside editable
+  // text fields so dialog textareas and inputs still scroll normally.
   useEffect(() => {
     function onWheel(e: WheelEvent) {
-      const container = canvasRef.current;
+      const target = e.target as Element | null;
+      if (target) {
+        const t = target as HTMLElement;
+        if (
+          t.tagName === "TEXTAREA" ||
+          t.tagName === "INPUT" ||
+          t.tagName === "SELECT" ||
+          t.isContentEditable
+        ) return;
+        if (typeof t.closest === "function" &&
+            t.closest("textarea, input, select, [contenteditable=\"true\"]")) {
+          return;
+        }
+      }
       const svg = svgRef.current;
-      if (!container || !svg) return;
-      const target = e.target as HTMLElement | null;
-      if (!target) return;
-      if (target.closest("textarea, input, select, [contenteditable=\"true\"]")) return;
-      if (!container.contains(target)) return;
+      if (!svg) return;
       e.preventDefault();
+      e.stopImmediatePropagation();
       const rect = svg.getBoundingClientRect();
       const sx = e.clientX - rect.left;
       const sy = e.clientY - rect.top;
@@ -417,8 +425,9 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
         return { scale, tx: sx - bx * scale, ty: sy - by * scale };
       });
     }
-    window.addEventListener("wheel", onWheel, { passive: false });
-    return () => window.removeEventListener("wheel", onWheel);
+    window.addEventListener("wheel", onWheel, { passive: false, capture: true });
+    return () =>
+      window.removeEventListener("wheel", onWheel, { capture: true } as EventListenerOptions);
   }, []);
 
   // Pointer handlers (rAF coalesced)
