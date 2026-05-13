@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -9,21 +9,23 @@ import {
   renameBoard,
   saveBoard,
 } from "@/lib/storage";
-import type { Board, Edge, Shape, ShapeKind } from "@/lib/types";
+import type { Anchor, Board, Edge, Shape, ShapeKind } from "@/lib/types";
 import { newId } from "@/lib/id";
 import { layoutMindmap, type MindmapNode } from "@/lib/mindmap";
 import ImportDialog from "./ImportDialog";
 
 type Mode = "select" | "connect";
 type Corner = "nw" | "ne" | "sw" | "se";
+type Pt = { x: number; y: number };
+type Viewport = { tx: number; ty: number; scale: number };
 
 type Drag =
   | { kind: "none" }
   | { kind: "pan"; startSx: number; startSy: number; startTx: number; startTy: number }
-  | { kind: "move"; id: string; startSx: number; startSy: number; origX: number; origY: number; scale: number; moved: boolean }
+  | { kind: "move"; id: string; startSx: number; startSy: number; origX: number; origY: number; w: number; h: number; scale: number; moved: boolean }
   | { kind: "resize"; id: string; corner: Corner; orig: Shape; startSx: number; startSy: number; scale: number }
   | { kind: "pinch"; initialDist: number; initialScale: number; initialTx: number; initialTy: number; centerSx: number; centerSy: number }
-  | { kind: "connecting"; fromId: string };
+  | { kind: "connecting"; fromId: string; fromAnchor: Anchor };
 
 const DEFAULTS: Record<ShapeKind, Pick<Shape, "w" | "h" | "fill" | "stroke" | "fontSize">> = {
   rect: { w: 160, h: 96, fill: "#fef3c7", stroke: "#1f2937", fontSize: 14 },
@@ -38,11 +40,15 @@ const DEFAULT_HIGHLIGHT = "#fde047";
 const FONT_MIN = 10;
 const FONT_MAX = 72;
 const FONT_STEP = 2;
+const SNAP_PX = 6;
+const HISTORY_LIMIT = 50;
+
+// ---------- pure helpers ----------
 
 function clamp(v: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, v));
 }
-function shapeCenter(s: Shape) {
+function shapeCenter(s: Shape): Pt {
   return { x: s.x + s.w / 2, y: s.y + s.h / 2 };
 }
 function effFontSize(s: Shape): number {
@@ -62,6 +68,100 @@ function clipPathFor(kind: ShapeKind): string | undefined {
 function pointInShape(s: Shape, x: number, y: number): boolean {
   return x >= s.x && x <= s.x + s.w && y >= s.y && y <= s.y + s.h;
 }
+function anchorPoint(s: Shape, anchor: Anchor): Pt {
+  switch (anchor) {
+    case "top": return { x: s.x + s.w / 2, y: s.y };
+    case "right": return { x: s.x + s.w, y: s.y + s.h / 2 };
+    case "bottom": return { x: s.x + s.w / 2, y: s.y + s.h };
+    case "left": return { x: s.x, y: s.y + s.h / 2 };
+  }
+}
+function controlOffset(anchor: Anchor, dist: number): Pt {
+  switch (anchor) {
+    case "top": return { x: 0, y: -dist };
+    case "right": return { x: dist, y: 0 };
+    case "bottom": return { x: 0, y: dist };
+    case "left": return { x: -dist, y: 0 };
+  }
+}
+function bestAnchorPair(a: Shape, b: Shape): [Anchor, Anchor] {
+  const dx = (b.x + b.w / 2) - (a.x + a.w / 2);
+  const dy = (b.y + b.h / 2) - (a.y + a.h / 2);
+  if (Math.abs(dx) > Math.abs(dy)) {
+    return dx > 0 ? ["right", "left"] : ["left", "right"];
+  }
+  return dy > 0 ? ["bottom", "top"] : ["top", "bottom"];
+}
+function closestAnchor(s: Shape, x: number, y: number): Anchor {
+  const anchors: Anchor[] = ["top", "right", "bottom", "left"];
+  let best: Anchor = "top";
+  let bestD = Infinity;
+  for (const a of anchors) {
+    const p = anchorPoint(s, a);
+    const d = Math.hypot(x - p.x, y - p.y);
+    if (d < bestD) { bestD = d; best = a; }
+  }
+  return best;
+}
+function edgePath(p1: Pt, p2: Pt, a1: Anchor, a2: Anchor): string {
+  const dx = p2.x - p1.x;
+  const dy = p2.y - p1.y;
+  const dist = clamp(Math.hypot(dx, dy) * 0.45, 40, 240);
+  const c1 = controlOffset(a1, dist);
+  const c2 = controlOffset(a2, dist);
+  return `M ${p1.x} ${p1.y} C ${p1.x + c1.x} ${p1.y + c1.y}, ${p2.x + c2.x} ${p2.y + c2.y}, ${p2.x} ${p2.y}`;
+}
+function loosePath(p1: Pt, a1: Anchor, to: Pt): string {
+  const dx = to.x - p1.x;
+  const dy = to.y - p1.y;
+  const dist = clamp(Math.hypot(dx, dy) * 0.5, 30, 220);
+  const c1 = controlOffset(a1, dist);
+  // mirror direction at the loose end so the curve is smooth
+  const c2 = { x: -dx * 0.3, y: -dy * 0.3 };
+  return `M ${p1.x} ${p1.y} C ${p1.x + c1.x} ${p1.y + c1.y}, ${to.x + c2.x} ${to.y + c2.y}, ${to.x} ${to.y}`;
+}
+
+// snap math: returns delta to apply + which positions matched
+function computeSnap(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  others: Shape[],
+  threshold: number,
+): { x: number; y: number; guideX: number | null; guideY: number | null } {
+  const myV = [x, x + w / 2, x + w];
+  const myH = [y, y + h / 2, y + h];
+  let bestDX = threshold;
+  let bestDY = threshold;
+  let snapDX = 0;
+  let snapDY = 0;
+  let guideX: number | null = null;
+  let guideY: number | null = null;
+  for (const o of others) {
+    const ov = [o.x, o.x + o.w / 2, o.x + o.w];
+    const oh = [o.y, o.y + o.h / 2, o.y + o.h];
+    for (let i = 0; i < 3; i++) {
+      for (let j = 0; j < 3; j++) {
+        const dxv = ov[j] - myV[i];
+        if (Math.abs(dxv) < bestDX) {
+          bestDX = Math.abs(dxv);
+          snapDX = dxv;
+          guideX = ov[j];
+        }
+        const dyv = oh[j] - myH[i];
+        if (Math.abs(dyv) < bestDY) {
+          bestDY = Math.abs(dyv);
+          snapDY = dyv;
+          guideY = oh[j];
+        }
+      }
+    }
+  }
+  return { x: x + snapDX, y: y + snapDY, guideX, guideY };
+}
+
+// ---------- main component ----------
 
 export default function BoardEditor({ boardId }: { boardId: string }) {
   const router = useRouter();
@@ -72,30 +172,38 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>("select");
   const [edgeFromId, setEdgeFromId] = useState<string | null>(null);
-  const [viewport, setViewport] = useState({ tx: 0, ty: 0, scale: 1 });
+  const [viewport, setViewport] = useState<Viewport>({ tx: 0, ty: 0, scale: 1 });
   const [importOpen, setImportOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [name, setName] = useState("");
   const [connectPreview, setConnectPreview] = useState<{
     fromId: string;
+    fromAnchor: Anchor;
     toX: number;
     toY: number;
     targetId: string | null;
+    toAnchor: Anchor | null;
   } | null>(null);
+  const [snapGuides, setSnapGuides] = useState<{ x: number | null; y: number | null }>({ x: null, y: null });
+  const [, setHistoryVersion] = useState(0);
 
   const svgRef = useRef<SVGSVGElement | null>(null);
   const dragRef = useRef<Drag>({ kind: "none" });
-  const pointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const pointersRef = useRef<Map<number, Pt>>(new Map());
   const shapesRef = useRef<Shape[]>([]);
+  const edgesRef = useRef<Edge[]>([]);
   const viewportRef = useRef(viewport);
+  const connectPreviewRef = useRef<typeof connectPreview>(null);
+  const historyRef = useRef<{ shapes: Shape[]; edges: Edge[] }[]>([]);
+  const futureRef = useRef<{ shapes: Shape[]; edges: Edge[] }[]>([]);
+  const rafRef = useRef<number | null>(null);
+  const pendingMoveRef = useRef<PointerEvent | null>(null);
 
-  useEffect(() => {
-    shapesRef.current = shapes;
-  }, [shapes]);
-  useEffect(() => {
-    viewportRef.current = viewport;
-  }, [viewport]);
+  useEffect(() => { shapesRef.current = shapes; }, [shapes]);
+  useEffect(() => { edgesRef.current = edges; }, [edges]);
+  useEffect(() => { viewportRef.current = viewport; }, [viewport]);
+  useEffect(() => { connectPreviewRef.current = connectPreview; }, [connectPreview]);
 
   // Load board
   useEffect(() => {
@@ -108,6 +216,8 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     setShapes(b.shapes);
     setEdges(b.edges);
     setName(b.name);
+    historyRef.current = [];
+    futureRef.current = [];
   }, [boardId]);
 
   // Auto-save
@@ -118,6 +228,37 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     }, 350);
     return () => clearTimeout(t);
   }, [board, name, shapes, edges]);
+
+  const pushHistory = useCallback(() => {
+    historyRef.current.push({ shapes: shapesRef.current, edges: edgesRef.current });
+    if (historyRef.current.length > HISTORY_LIMIT) historyRef.current.shift();
+    futureRef.current = [];
+    setHistoryVersion((v) => v + 1);
+  }, []);
+
+  const undo = useCallback(() => {
+    const prev = historyRef.current.pop();
+    if (!prev) return;
+    futureRef.current.unshift({ shapes: shapesRef.current, edges: edgesRef.current });
+    if (futureRef.current.length > HISTORY_LIMIT) futureRef.current.pop();
+    setShapes(prev.shapes);
+    setEdges(prev.edges);
+    setSelectedId(null);
+    setEditingId(null);
+    setHistoryVersion((v) => v + 1);
+  }, []);
+
+  const redo = useCallback(() => {
+    const next = futureRef.current.shift();
+    if (!next) return;
+    historyRef.current.push({ shapes: shapesRef.current, edges: edgesRef.current });
+    if (historyRef.current.length > HISTORY_LIMIT) historyRef.current.shift();
+    setShapes(next.shapes);
+    setEdges(next.edges);
+    setSelectedId(null);
+    setEditingId(null);
+    setHistoryVersion((v) => v + 1);
+  }, []);
 
   // Wheel zoom (desktop)
   useEffect(() => {
@@ -130,7 +271,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       const sy = e.clientY - rect.top;
       setViewport((v) => {
         const factor = e.deltaY > 0 ? 1 / 1.1 : 1.1;
-        const scale = clamp(v.scale * factor, 0.15, 4);
+        const scale = clamp(v.scale * factor, 0.1, 4);
         const bx = (sx - v.tx) / v.scale;
         const by = (sy - v.ty) / v.scale;
         return { scale, tx: sx - bx * scale, ty: sy - by * scale };
@@ -140,9 +281,9 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     return () => svg.removeEventListener("wheel", onWheel);
   }, []);
 
-  // Global pointer move/up for drags + pinch + connecting
+  // Pointer move/up handlers with rAF coalescing
   useEffect(() => {
-    function onMove(e: PointerEvent) {
+    function handleMove(e: PointerEvent) {
       const d = dragRef.current;
       if (d.kind === "none") return;
       const svg = svgRef.current;
@@ -160,7 +301,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
         const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
         const mx = (pts[0].x + pts[1].x) / 2 - rect.left;
         const my = (pts[0].y + pts[1].y) / 2 - rect.top;
-        const scale = clamp(d.initialScale * (dist / d.initialDist), 0.15, 4);
+        const scale = clamp(d.initialScale * (dist / d.initialDist), 0.1, 4);
         const bx = (d.centerSx - d.initialTx) / d.initialScale;
         const by = (d.centerSy - d.initialTy) / d.initialScale;
         setViewport({ scale, tx: mx - bx * scale, ty: my - by * scale });
@@ -170,17 +311,27 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
         const vp = viewportRef.current;
         const bx = (sx - vp.tx) / vp.scale;
         const by = (sy - vp.ty) / vp.scale;
-        let targetId: string | null = null;
         const list = shapesRef.current;
+        let targetId: string | null = null;
         for (let i = list.length - 1; i >= 0; i--) {
           const s = list[i];
           if (s.id === d.fromId) continue;
-          if (pointInShape(s, bx, by)) {
-            targetId = s.id;
-            break;
-          }
+          if (pointInShape(s, bx, by)) { targetId = s.id; break; }
         }
-        setConnectPreview({ fromId: d.fromId, toX: bx, toY: by, targetId });
+        const toAnchor = targetId
+          ? closestAnchor(list.find((s) => s.id === targetId)!, bx, by)
+          : null;
+        const endPt = targetId && toAnchor
+          ? anchorPoint(list.find((s) => s.id === targetId)!, toAnchor)
+          : { x: bx, y: by };
+        setConnectPreview({
+          fromId: d.fromId,
+          fromAnchor: d.fromAnchor,
+          toX: endPt.x,
+          toY: endPt.y,
+          targetId,
+          toAnchor,
+        });
         return;
       }
       if (d.kind === "pan") {
@@ -188,46 +339,91 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
         return;
       }
       if (d.kind === "move") {
-        const dx = (sx - d.startSx) / d.scale;
-        const dy = (sy - d.startSy) / d.scale;
-        if (Math.abs(dx) + Math.abs(dy) > 1) d.moved = true;
-        setShapes((ss) => ss.map((s) => (s.id === d.id ? { ...s, x: d.origX + dx, y: d.origY + dy } : s)));
+        const dxBoard = (sx - d.startSx) / d.scale;
+        const dyBoard = (sy - d.startSy) / d.scale;
+        if (Math.abs(dxBoard) + Math.abs(dyBoard) > 1) d.moved = true;
+        const candidateX = d.origX + dxBoard;
+        const candidateY = d.origY + dyBoard;
+        const others = shapesRef.current.filter((s) => s.id !== d.id);
+        const threshold = SNAP_PX / d.scale;
+        const snapped = computeSnap(candidateX, candidateY, d.w, d.h, others, threshold);
+        setShapes((ss) => ss.map((s) => (s.id === d.id ? { ...s, x: snapped.x, y: snapped.y } : s)));
+        setSnapGuides({ x: snapped.guideX, y: snapped.guideY });
         return;
       }
       if (d.kind === "resize") {
-        const dx = (sx - d.startSx) / d.scale;
-        const dy = (sy - d.startSy) / d.scale;
+        const dxBoard = (sx - d.startSx) / d.scale;
+        const dyBoard = (sy - d.startSy) / d.scale;
         setShapes((ss) =>
           ss.map((s) => {
             if (s.id !== d.id) return s;
             const o = d.orig;
             let nx = o.x, ny = o.y, nw = o.w, nh = o.h;
-            if (d.corner === "se") { nw = o.w + dx; nh = o.h + dy; }
-            if (d.corner === "ne") { ny = o.y + dy; nh = o.h - dy; nw = o.w + dx; }
-            if (d.corner === "sw") { nx = o.x + dx; nw = o.w - dx; nh = o.h + dy; }
-            if (d.corner === "nw") { nx = o.x + dx; ny = o.y + dy; nw = o.w - dx; nh = o.h - dy; }
+            if (d.corner === "se") { nw = o.w + dxBoard; nh = o.h + dyBoard; }
+            if (d.corner === "ne") { ny = o.y + dyBoard; nh = o.h - dyBoard; nw = o.w + dxBoard; }
+            if (d.corner === "sw") { nx = o.x + dxBoard; nw = o.w - dxBoard; nh = o.h + dyBoard; }
+            if (d.corner === "nw") { nx = o.x + dxBoard; ny = o.y + dyBoard; nw = o.w - dxBoard; nh = o.h - dyBoard; }
             return { ...s, x: nx, y: ny, w: Math.max(40, nw), h: Math.max(32, nh) };
           }),
         );
       }
     }
+
+    function onMove(e: PointerEvent) {
+      pendingMoveRef.current = e;
+      if (rafRef.current != null) return;
+      rafRef.current = requestAnimationFrame(() => {
+        rafRef.current = null;
+        const pending = pendingMoveRef.current;
+        pendingMoveRef.current = null;
+        if (pending) handleMove(pending);
+      });
+    }
+
     function onEnd(e: PointerEvent) {
-      pointersRef.current.delete(e.pointerId);
       const d = dragRef.current;
       if (d.kind === "connecting") {
-        const preview = connectPreviewRef.current;
-        if (preview?.targetId) {
+        // Decide target from the raw release position, not from stale state.
+        const svg = svgRef.current;
+        let targetId: string | null = null;
+        let toAnchor: Anchor | null = null;
+        if (svg) {
+          const rect = svg.getBoundingClientRect();
+          const sx = e.clientX - rect.left;
+          const sy = e.clientY - rect.top;
+          const vp = viewportRef.current;
+          const bx = (sx - vp.tx) / vp.scale;
+          const by = (sy - vp.ty) / vp.scale;
+          const list = shapesRef.current;
+          for (let i = list.length - 1; i >= 0; i--) {
+            const s = list[i];
+            if (s.id === d.fromId) continue;
+            if (pointInShape(s, bx, by)) {
+              targetId = s.id;
+              toAnchor = closestAnchor(s, bx, by);
+              break;
+            }
+          }
+        }
+        if (targetId && toAnchor) {
           const fromId = d.fromId;
-          const toId = preview.targetId;
+          const fromAnchor = d.fromAnchor;
+          const finalToId = targetId;
+          const finalToAnchor = toAnchor;
           setEdges((es) =>
-            es.some((x) => x.from === fromId && x.to === toId)
+            es.some((x) => x.from === fromId && x.to === finalToId)
               ? es
-              : [...es, { id: newId("e_"), from: fromId, to: toId }],
+              : [...es, { id: newId("e_"), from: fromId, to: finalToId, fromAnchor, toAnchor: finalToAnchor }],
           );
         }
         setConnectPreview(null);
         dragRef.current = { kind: "none" };
+        pointersRef.current.delete(e.pointerId);
         return;
+      }
+      pointersRef.current.delete(e.pointerId);
+      if (d.kind === "move") {
+        setSnapGuides({ x: null, y: null });
       }
       if (d.kind === "pinch" && pointersRef.current.size < 2) {
         dragRef.current = { kind: "none" };
@@ -235,6 +431,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
         dragRef.current = { kind: "none" };
       }
     }
+
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onEnd);
     window.addEventListener("pointercancel", onEnd);
@@ -242,20 +439,51 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onEnd);
       window.removeEventListener("pointercancel", onEnd);
+      if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
     };
   }, []);
 
-  // Keep latest connectPreview accessible in onEnd
-  const connectPreviewRef = useRef<typeof connectPreview>(null);
-  useEffect(() => {
-    connectPreviewRef.current = connectPreview;
-  }, [connectPreview]);
+  const deleteShape = useCallback((id: string) => {
+    pushHistory();
+    setShapes((s) => s.filter((x) => x.id !== id));
+    setEdges((es) => es.filter((x) => x.from !== id && x.to !== id));
+    setSelectedId((sel) => (sel === id ? null : sel));
+    setEditingId((ed) => (ed === id ? null : ed));
+  }, [pushHistory]);
 
-  // Keyboard (desktop)
+  const duplicateShape = useCallback((id: string) => {
+    const src = shapesRef.current.find((s) => s.id === id);
+    if (!src) return;
+    pushHistory();
+    const copy: Shape = { ...src, id: newId("s_"), x: src.x + 24, y: src.y + 24 };
+    setShapes((ss) => [...ss, copy]);
+    setSelectedId(copy.id);
+  }, [pushHistory]);
+
+  // Keyboard
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (editingId) return;
       const tag = (e.target as HTMLElement | null)?.tagName;
+      const cmd = e.metaKey || e.ctrlKey;
+      if (cmd && e.key.toLowerCase() === "z") {
+        if (tag === "INPUT" || tag === "TEXTAREA") return;
+        e.preventDefault();
+        if (e.shiftKey) redo(); else undo();
+        return;
+      }
+      if (cmd && e.key.toLowerCase() === "y") {
+        if (tag === "INPUT" || tag === "TEXTAREA") return;
+        e.preventDefault();
+        redo();
+        return;
+      }
+      if (cmd && e.key.toLowerCase() === "d" && selectedId) {
+        if (tag === "INPUT" || tag === "TEXTAREA") return;
+        e.preventDefault();
+        duplicateShape(selectedId);
+        return;
+      }
+      if (editingId) return;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
       if ((e.key === "Delete" || e.key === "Backspace") && selectedId) {
         e.preventDefault();
@@ -268,15 +496,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId, editingId]);
-
-  function deleteShape(id: string) {
-    setShapes((s) => s.filter((x) => x.id !== id));
-    setEdges((es) => es.filter((x) => x.from !== id && x.to !== id));
-    if (selectedId === id) setSelectedId(null);
-    if (editingId === id) setEditingId(null);
-  }
+  }, [selectedId, editingId, undo, redo, deleteShape, duplicateShape]);
 
   function trySwitchToPinch(): boolean {
     if (pointersRef.current.size < 2) return false;
@@ -288,17 +508,19 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     dragRef.current = {
       kind: "pinch",
       initialDist: dist,
-      initialScale: viewport.scale,
-      initialTx: viewport.tx,
-      initialTy: viewport.ty,
+      initialScale: viewportRef.current.scale,
+      initialTx: viewportRef.current.tx,
+      initialTy: viewportRef.current.ty,
       centerSx,
       centerSy,
     };
     setConnectPreview(null);
+    setSnapGuides({ x: null, y: null });
     return true;
   }
 
   function addShape(kind: ShapeKind) {
+    pushHistory();
     const rect = svgRef.current!.getBoundingClientRect();
     const cx = (rect.width / 2 - viewport.tx) / viewport.scale;
     const cy = (rect.height / 2 - viewport.ty) / viewport.scale;
@@ -320,13 +542,9 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     setAddOpen(false);
   }
 
-  function maybeCloseEdit() {
-    if (editingId) setEditingId(null);
-  }
-
-  function onShapePointerDown(e: React.PointerEvent, s: Shape) {
+  const onShapePointerDown = useCallback((e: React.PointerEvent, s: Shape) => {
     e.stopPropagation();
-    maybeCloseEdit();
+    if (editingId) setEditingId(null);
     pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (trySwitchToPinch()) return;
 
@@ -334,11 +552,17 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       if (!edgeFromId) {
         setEdgeFromId(s.id);
       } else if (edgeFromId !== s.id) {
-        setEdges((es) =>
-          es.some((x) => x.from === edgeFromId && x.to === s.id)
-            ? es
-            : [...es, { id: newId("e_"), from: edgeFromId, to: s.id }],
-        );
+        const fromShape = shapesRef.current.find((x) => x.id === edgeFromId);
+        if (fromShape) {
+          const [fa, ta] = bestAnchorPair(fromShape, s);
+          const fromId = edgeFromId;
+          pushHistory();
+          setEdges((es) =>
+            es.some((x) => x.from === fromId && x.to === s.id)
+              ? es
+              : [...es, { id: newId("e_"), from: fromId, to: s.id, fromAnchor: fa, toAnchor: ta }],
+          );
+        }
         setEdgeFromId(null);
         setMode("select");
       }
@@ -346,6 +570,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     }
     setSelectedId(s.id);
     const rect = svgRef.current!.getBoundingClientRect();
+    pushHistory();
     dragRef.current = {
       kind: "move",
       id: s.id,
@@ -353,13 +578,22 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       startSy: e.clientY - rect.top,
       origX: s.x,
       origY: s.y,
-      scale: viewport.scale,
+      w: s.w,
+      h: s.h,
+      scale: viewportRef.current.scale,
       moved: false,
     };
-  }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingId, mode, edgeFromId, pushHistory]);
+
+  const onShapeDoubleClick = useCallback((id: string) => {
+    pushHistory();
+    setEditingId(id);
+    setSelectedId(id);
+  }, [pushHistory]);
 
   function onCanvasPointerDown(e: React.PointerEvent) {
-    maybeCloseEdit();
+    if (editingId) setEditingId(null);
     pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (trySwitchToPinch()) return;
 
@@ -385,6 +619,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     e.stopPropagation();
     pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (trySwitchToPinch()) return;
+    pushHistory();
     const rect = svgRef.current!.getBoundingClientRect();
     dragRef.current = {
       kind: "resize",
@@ -397,38 +632,58 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     };
   }
 
-  function onDotPointerDown(e: React.PointerEvent, s: Shape) {
+  function onDotPointerDown(e: React.PointerEvent, s: Shape, anchor: Anchor) {
     e.stopPropagation();
     pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (trySwitchToPinch()) return;
-    dragRef.current = { kind: "connecting", fromId: s.id };
-    const c = shapeCenter(s);
-    setConnectPreview({ fromId: s.id, toX: c.x, toY: c.y, targetId: null });
+    dragRef.current = { kind: "connecting", fromId: s.id, fromAnchor: anchor };
+    const start = anchorPoint(s, anchor);
+    setConnectPreview({
+      fromId: s.id,
+      fromAnchor: anchor,
+      toX: start.x,
+      toY: start.y,
+      targetId: null,
+      toAnchor: null,
+    });
   }
 
-  function updateShape(id: string, patch: Partial<Shape>) {
+  const updateShape = useCallback((id: string, patch: Partial<Shape>, opts?: { history?: boolean }) => {
+    if (opts?.history !== false) pushHistory();
     setShapes((ss) => ss.map((s) => (s.id === id ? { ...s, ...patch } : s)));
-  }
+  }, [pushHistory]);
 
   function bumpFontSize(id: string, delta: number) {
+    pushHistory();
     setShapes((ss) =>
       ss.map((s) => (s.id === id ? { ...s, fontSize: clamp(effFontSize(s) + delta, FONT_MIN, FONT_MAX) } : s)),
     );
   }
 
-  function applyMindmap(root: MindmapNode) {
-    const { shapes: ms, edges: me } = layoutMindmap(root);
-    const rect = svgRef.current!.getBoundingClientRect();
-    const cx = (rect.width / 2 - viewport.tx) / viewport.scale;
-    const cy = (rect.height / 2 - viewport.ty) / viewport.scale;
+  function autoFitTo(ms: Shape[], padding = 60) {
+    if (!ms.length) return;
     const minX = Math.min(...ms.map((s) => s.x));
     const maxX = Math.max(...ms.map((s) => s.x + s.w));
     const minY = Math.min(...ms.map((s) => s.y));
     const maxY = Math.max(...ms.map((s) => s.y + s.h));
-    const dx = cx - (minX + maxX) / 2;
-    const dy = cy - (minY + maxY) / 2;
-    setShapes((ss) => [...ss, ...ms.map((s) => ({ ...s, x: s.x + dx, y: s.y + dy }))]);
+    const bw = maxX - minX;
+    const bh = maxY - minY;
+    const rect = svgRef.current!.getBoundingClientRect();
+    const vw = Math.max(1, rect.width - padding * 2);
+    const vh = Math.max(1, rect.height - padding * 2);
+    const scale = clamp(Math.min(vw / bw, vh / bh), 0.1, 1);
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    setViewport({ scale, tx: rect.width / 2 - cx * scale, ty: rect.height / 2 - cy * scale });
+  }
+
+  function applyMindmap(root: MindmapNode) {
+    pushHistory();
+    const { shapes: ms, edges: me } = layoutMindmap(root);
+    setShapes((ss) => [...ss, ...ms]);
     setEdges((es) => [...es, ...me]);
+    // After commit, fit to the imported set.
+    requestAnimationFrame(() => autoFitTo(ms));
   }
 
   function onDeleteBoard() {
@@ -438,6 +693,21 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       router.push("/");
     }
   }
+
+  // Pre-compute edge paths for stable rendering
+  const renderedEdges = useMemo(() => {
+    return edges.map((e) => {
+      const a = shapes.find((s) => s.id === e.from);
+      const b = shapes.find((s) => s.id === e.to);
+      if (!a || !b) return null;
+      const [fa, ta] = (e.fromAnchor && e.toAnchor)
+        ? [e.fromAnchor, e.toAnchor]
+        : bestAnchorPair(a, b);
+      const p1 = anchorPoint(a, fa);
+      const p2 = anchorPoint(b, ta);
+      return { id: e.id, d: edgePath(p1, p2, fa, ta) };
+    });
+  }, [edges, shapes]);
 
   if (board === undefined) return <div className="p-8 text-slate-500">Loading…</div>;
   if (board === null) {
@@ -452,6 +722,8 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
   const selected = shapes.find((s) => s.id === selectedId) ?? null;
   const editing = shapes.find((s) => s.id === editingId) ?? null;
   const connectingFrom = connectPreview ? shapes.find((s) => s.id === connectPreview.fromId) ?? null : null;
+  const canUndo = historyRef.current.length > 0;
+  const canRedo = futureRef.current.length > 0;
 
   return (
     <div className="flex flex-col" style={{ height: "100dvh" }}>
@@ -499,38 +771,97 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
           className="canvas-surface absolute inset-0 w-full h-full"
           onPointerDown={onCanvasPointerDown}
         >
+          <defs>
+            <marker
+              id="edge-arrow"
+              viewBox="0 0 10 10"
+              refX="9"
+              refY="5"
+              markerWidth={6}
+              markerHeight={6}
+              orient="auto"
+              markerUnits="strokeWidth"
+            >
+              <path d="M0,0 L10,5 L0,10 Z" fill="#475569" />
+            </marker>
+            <marker
+              id="edge-arrow-preview"
+              viewBox="0 0 10 10"
+              refX="9"
+              refY="5"
+              markerWidth={6}
+              markerHeight={6}
+              orient="auto"
+              markerUnits="strokeWidth"
+            >
+              <path d="M0,0 L10,5 L0,10 Z" fill="#6366f1" />
+            </marker>
+          </defs>
+
           <g transform={`translate(${viewport.tx} ${viewport.ty}) scale(${viewport.scale})`}>
-            {edges.map((e) => {
-              const a = shapes.find((s) => s.id === e.from);
-              const b = shapes.find((s) => s.id === e.to);
-              if (!a || !b) return null;
-              const p1 = shapeCenter(a);
-              const p2 = shapeCenter(b);
-              return (
-                <line
+            {renderedEdges.map((e) =>
+              e ? (
+                <path
                   key={e.id}
-                  x1={p1.x}
-                  y1={p1.y}
-                  x2={p2.x}
-                  y2={p2.y}
+                  d={e.d}
                   stroke="#475569"
                   strokeWidth={2}
+                  fill="none"
                   vectorEffect="non-scaling-stroke"
+                  markerEnd="url(#edge-arrow)"
                 />
-              );
-            })}
+              ) : null,
+            )}
 
-            {/* Live connection preview line */}
-            {connectPreview && connectingFrom && (
+            {/* Snap guides */}
+            {snapGuides.x !== null && (
               <line
-                x1={shapeCenter(connectingFrom).x}
-                y1={shapeCenter(connectingFrom).y}
-                x2={connectPreview.toX}
-                y2={connectPreview.toY}
+                x1={snapGuides.x}
+                y1={-1e6}
+                x2={snapGuides.x}
+                y2={1e6}
+                stroke="#f43f5e"
+                strokeWidth={1}
+                vectorEffect="non-scaling-stroke"
+                pointerEvents="none"
+              />
+            )}
+            {snapGuides.y !== null && (
+              <line
+                x1={-1e6}
+                y1={snapGuides.y}
+                x2={1e6}
+                y2={snapGuides.y}
+                stroke="#f43f5e"
+                strokeWidth={1}
+                vectorEffect="non-scaling-stroke"
+                pointerEvents="none"
+              />
+            )}
+
+            {/* Connect preview */}
+            {connectPreview && connectingFrom && (
+              <path
+                d={
+                  connectPreview.targetId && connectPreview.toAnchor
+                    ? edgePath(
+                        anchorPoint(connectingFrom, connectPreview.fromAnchor),
+                        { x: connectPreview.toX, y: connectPreview.toY },
+                        connectPreview.fromAnchor,
+                        connectPreview.toAnchor,
+                      )
+                    : loosePath(
+                        anchorPoint(connectingFrom, connectPreview.fromAnchor),
+                        connectPreview.fromAnchor,
+                        { x: connectPreview.toX, y: connectPreview.toY },
+                      )
+                }
                 stroke="#6366f1"
                 strokeWidth={2.5}
-                strokeDasharray="6 4"
+                strokeDasharray={connectPreview.targetId ? undefined : "6 4"}
+                fill="none"
                 vectorEffect="non-scaling-stroke"
+                markerEnd="url(#edge-arrow-preview)"
                 pointerEvents="none"
               />
             )}
@@ -543,11 +874,8 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
                 editing={s.id === editingId}
                 connectSource={s.id === edgeFromId || s.id === connectPreview?.fromId}
                 connectTarget={s.id === connectPreview?.targetId}
-                onPointerDown={(e) => onShapePointerDown(e, s)}
-                onDoubleClick={() => {
-                  setEditingId(s.id);
-                  setSelectedId(s.id);
-                }}
+                onPointerDown={onShapePointerDown}
+                onDoubleClick={onShapeDoubleClick}
               />
             ))}
 
@@ -561,9 +889,26 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
                 <ConnectionDots
                   shape={selected}
                   scale={viewport.scale}
-                  onStart={(e) => onDotPointerDown(e, selected)}
+                  highlightAnchor={connectPreview?.toAnchor && connectPreview?.targetId === selected.id ? connectPreview.toAnchor : null}
+                  onStart={(e, anchor) => onDotPointerDown(e, selected, anchor)}
                 />
               </>
+            )}
+
+            {/* Highlight the live target's incoming anchor */}
+            {connectPreview?.targetId && connectPreview.toAnchor && connectPreview.targetId !== selected?.id && (
+              (() => {
+                const tgt = shapes.find((s) => s.id === connectPreview.targetId);
+                if (!tgt) return null;
+                const p = anchorPoint(tgt, connectPreview.toAnchor);
+                return (
+                  <circle
+                    cx={p.x} cy={p.y} r={12 / viewport.scale}
+                    fill="#22c55e" stroke="white" strokeWidth={2 / viewport.scale}
+                    pointerEvents="none"
+                  />
+                );
+              })()
             )}
           </g>
         </svg>
@@ -573,12 +918,12 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
             <TextEditOverlay
               shape={editing}
               viewport={viewport}
-              onChange={(text) => updateShape(editing.id, { text })}
+              onChange={(text) => updateShape(editing.id, { text }, { history: false })}
               onDone={() => setEditingId(null)}
             />
             <EditingTopBar
               shape={editing}
-              onToggle={(patch) => updateShape(editing.id, patch)}
+              onToggle={(patch) => updateShape(editing.id, patch, { history: false })}
               onBump={(delta) => bumpFontSize(editing.id, delta)}
               onDone={() => setEditingId(null)}
             />
@@ -591,13 +936,41 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
           </div>
         )}
 
+        {/* Undo/Redo floating buttons */}
+        <div
+          className="absolute left-2 top-2 z-20 pointer-events-none"
+        >
+          <div className="pointer-events-auto bg-white/90 backdrop-blur border shadow rounded-xl flex">
+            <button
+              onClick={undo}
+              disabled={!canUndo}
+              className="h-10 px-3 text-sm rounded-l-xl hover:bg-slate-100 disabled:opacity-30"
+              aria-label="Undo"
+              title="Undo (Cmd/Ctrl+Z)"
+            >
+              ↶
+            </button>
+            <div className="w-px bg-slate-200" />
+            <button
+              onClick={redo}
+              disabled={!canRedo}
+              className="h-10 px-3 text-sm rounded-r-xl hover:bg-slate-100 disabled:opacity-30"
+              aria-label="Redo"
+              title="Redo (Cmd/Ctrl+Shift+Z)"
+            >
+              ↷
+            </button>
+          </div>
+        </div>
+
         {selected && !editing ? (
           <Inspector
             shape={selected}
             onChange={(patch) => updateShape(selected.id, patch)}
             onBump={(delta) => bumpFontSize(selected.id, delta)}
             onDelete={() => deleteShape(selected.id)}
-            onEditText={() => setEditingId(selected.id)}
+            onDuplicate={() => duplicateShape(selected.id)}
+            onEditText={() => onShapeDoubleClick(selected.id)}
           />
         ) : (
           !editing && (
@@ -624,7 +997,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
 
 // ---------- sub-components ----------
 
-function ShapeNode({
+const ShapeNode = memo(function ShapeNode({
   shape,
   selected,
   editing,
@@ -638,11 +1011,9 @@ function ShapeNode({
   editing: boolean;
   connectSource: boolean;
   connectTarget: boolean;
-  onPointerDown: (e: React.PointerEvent) => void;
-  onDoubleClick: () => void;
+  onPointerDown: (e: React.PointerEvent, s: Shape) => void;
+  onDoubleClick: (id: string) => void;
 }) {
-  // While editing, render the shape in its final (un-selected) styling so the
-  // textarea overlay matches what the user will see when they're done.
   const strokeColor = editing
     ? shape.stroke
     : connectTarget
@@ -654,11 +1025,9 @@ function ShapeNode({
           : shape.stroke;
   const strokeW = editing ? 1.5 : selected || connectSource || connectTarget ? 2.5 : 1.5;
   const fillColor = effFill(shape);
-  const handlers = {
-    onPointerDown,
-    onDoubleClick,
-    style: { cursor: "move" as const, touchAction: "none" as const },
-  };
+  const handlePointerDown = (e: React.PointerEvent) => onPointerDown(e, shape);
+  const handleDoubleClick = () => onDoubleClick(shape.id);
+  const styleProps = { cursor: "move" as const, touchAction: "none" as const };
 
   let geometry: React.ReactNode;
   if (shape.kind === "rect") {
@@ -667,7 +1036,10 @@ function ShapeNode({
         x={shape.x} y={shape.y} width={shape.w} height={shape.h}
         rx={10} ry={10}
         fill={fillColor} stroke={strokeColor} strokeWidth={strokeW}
-        vectorEffect="non-scaling-stroke" {...handlers}
+        vectorEffect="non-scaling-stroke"
+        onPointerDown={handlePointerDown}
+        onDoubleClick={handleDoubleClick}
+        style={styleProps}
       />
     );
   } else if (shape.kind === "ellipse") {
@@ -676,7 +1048,10 @@ function ShapeNode({
         cx={shape.x + shape.w / 2} cy={shape.y + shape.h / 2}
         rx={shape.w / 2} ry={shape.h / 2}
         fill={fillColor} stroke={strokeColor} strokeWidth={strokeW}
-        vectorEffect="non-scaling-stroke" {...handlers}
+        vectorEffect="non-scaling-stroke"
+        onPointerDown={handlePointerDown}
+        onDoubleClick={handleDoubleClick}
+        style={styleProps}
       />
     );
   } else if (shape.kind === "diamond") {
@@ -690,11 +1065,13 @@ function ShapeNode({
       <polygon
         points={pts}
         fill={fillColor} stroke={strokeColor} strokeWidth={strokeW}
-        vectorEffect="non-scaling-stroke" {...handlers}
+        vectorEffect="non-scaling-stroke"
+        onPointerDown={handlePointerDown}
+        onDoubleClick={handleDoubleClick}
+        style={styleProps}
       />
     );
   } else {
-    // Text shape: transparent rect by default; highlight fills it when on.
     geometry = (
       <rect
         x={shape.x} y={shape.y} width={shape.w} height={shape.h}
@@ -703,7 +1080,10 @@ function ShapeNode({
         stroke={!editing && (selected || connectSource || connectTarget) ? strokeColor : "transparent"}
         strokeDasharray={!editing && selected ? "4 4" : undefined}
         strokeWidth={1.5}
-        vectorEffect="non-scaling-stroke" {...handlers}
+        vectorEffect="non-scaling-stroke"
+        onPointerDown={handlePointerDown}
+        onDoubleClick={handleDoubleClick}
+        style={styleProps}
       />
     );
   }
@@ -740,7 +1120,7 @@ function ShapeNode({
       </foreignObject>
     </g>
   );
-}
+});
 
 function ResizeHandles({
   shape,
@@ -786,38 +1166,44 @@ function ResizeHandles({
 function ConnectionDots({
   shape,
   scale,
+  highlightAnchor,
   onStart,
 }: {
   shape: Shape;
   scale: number;
-  onStart: (e: React.PointerEvent) => void;
+  highlightAnchor: Anchor | null;
+  onStart: (e: React.PointerEvent, anchor: Anchor) => void;
 }) {
   const vis = 12 / scale;
   const hit = 32 / scale;
-  const dots = [
-    { x: shape.x + shape.w / 2, y: shape.y },
-    { x: shape.x + shape.w, y: shape.y + shape.h / 2 },
-    { x: shape.x + shape.w / 2, y: shape.y + shape.h },
-    { x: shape.x, y: shape.y + shape.h / 2 },
+  const dots: { anchor: Anchor; x: number; y: number }[] = [
+    { anchor: "top", x: shape.x + shape.w / 2, y: shape.y },
+    { anchor: "right", x: shape.x + shape.w, y: shape.y + shape.h / 2 },
+    { anchor: "bottom", x: shape.x + shape.w / 2, y: shape.y + shape.h },
+    { anchor: "left", x: shape.x, y: shape.y + shape.h / 2 },
   ];
   return (
     <>
-      {dots.map((d, i) => (
-        <g key={i}>
-          <circle
-            cx={d.x} cy={d.y} r={hit / 2}
-            fill="transparent"
-            style={{ cursor: "crosshair", touchAction: "none" }}
-            onPointerDown={onStart}
-          />
-          <circle
-            cx={d.x} cy={d.y} r={vis / 2}
-            fill="#ffffff" stroke="#6366f1" strokeWidth={2}
-            vectorEffect="non-scaling-stroke"
-            pointerEvents="none"
-          />
-        </g>
-      ))}
+      {dots.map((d) => {
+        const active = highlightAnchor === d.anchor;
+        return (
+          <g key={d.anchor}>
+            <circle
+              cx={d.x} cy={d.y} r={hit / 2}
+              fill="transparent"
+              style={{ cursor: "crosshair", touchAction: "none" }}
+              onPointerDown={(e) => onStart(e, d.anchor)}
+            />
+            <circle
+              cx={d.x} cy={d.y} r={(active ? vis * 1.4 : vis) / 2}
+              fill={active ? "#22c55e" : "#ffffff"}
+              stroke={active ? "#16a34a" : "#6366f1"} strokeWidth={2}
+              vectorEffect="non-scaling-stroke"
+              pointerEvents="none"
+            />
+          </g>
+        );
+      })}
     </>
   );
 }
@@ -829,7 +1215,7 @@ function TextEditOverlay({
   onDone,
 }: {
   shape: Shape;
-  viewport: { tx: number; ty: number; scale: number };
+  viewport: Viewport;
   onChange: (text: string) => void;
   onDone: () => void;
 }) {
@@ -840,7 +1226,6 @@ function TextEditOverlay({
   const fontPx = effFontSize(shape) * viewport.scale;
   const isText = shape.kind === "text";
 
-  // Match the rendered shape's interior so the textarea is a true preview.
   const background = shape.highlight
     ? effHighlightColor(shape)
     : isText
@@ -866,7 +1251,6 @@ function TextEditOverlay({
         top,
         width,
         height,
-        // Identical to the foreignObject div inside ShapeNode:
         padding: 8,
         boxSizing: "border-box",
         textAlign: "center",
@@ -895,6 +1279,7 @@ function FmtBtn({
   label,
   bold,
   italic,
+  preventBlur,
   onActivate,
   ariaLabel,
 }: {
@@ -902,12 +1287,13 @@ function FmtBtn({
   label: string;
   bold?: boolean;
   italic?: boolean;
+  preventBlur?: boolean;
   onActivate: () => void;
   ariaLabel: string;
 }) {
   return (
     <button
-      onMouseDown={(e) => e.preventDefault()}
+      onMouseDown={preventBlur ? (e) => e.preventDefault() : undefined}
       onClick={onActivate}
       aria-pressed={active}
       aria-label={ariaLabel}
@@ -937,9 +1323,9 @@ function EditingTopBar({
     >
       <div className="flex flex-col items-center gap-2">
         <div className="pointer-events-auto bg-white border shadow-lg rounded-2xl p-1.5 flex items-center gap-1">
-          <FmtBtn label="B" bold active={!!shape.bold} onActivate={() => onToggle({ bold: !shape.bold })} ariaLabel="Bold" />
-          <FmtBtn label="I" italic active={!!shape.italic} onActivate={() => onToggle({ italic: !shape.italic })} ariaLabel="Italic" />
-          <FmtBtn label="H" active={!!shape.highlight} onActivate={() => onToggle({ highlight: !shape.highlight })} ariaLabel="Highlight" />
+          <FmtBtn preventBlur label="B" bold active={!!shape.bold} onActivate={() => onToggle({ bold: !shape.bold })} ariaLabel="Bold" />
+          <FmtBtn preventBlur label="I" italic active={!!shape.italic} onActivate={() => onToggle({ italic: !shape.italic })} ariaLabel="Italic" />
+          <FmtBtn preventBlur label="H" active={!!shape.highlight} onActivate={() => onToggle({ highlight: !shape.highlight })} ariaLabel="Highlight" />
           <div className="w-px h-6 bg-slate-200 mx-0.5" />
           <button
             onMouseDown={(e) => e.preventDefault()}
@@ -1063,12 +1449,14 @@ function Inspector({
   onChange,
   onBump,
   onDelete,
+  onDuplicate,
   onEditText,
 }: {
   shape: Shape;
   onChange: (p: Partial<Shape>) => void;
   onBump: (delta: number) => void;
   onDelete: () => void;
+  onDuplicate: () => void;
   onEditText: () => void;
 }) {
   return (
@@ -1078,7 +1466,6 @@ function Inspector({
     >
       <div className="flex justify-center">
         <div className="pointer-events-auto bg-white border shadow-lg rounded-2xl p-2 w-full max-w-md flex flex-col gap-2">
-          {/* Row 1: formatting */}
           <div className="flex items-center gap-1">
             <FmtBtn label="B" bold active={!!shape.bold} onActivate={() => onChange({ bold: !shape.bold })} ariaLabel="Bold" />
             <FmtBtn label="I" italic active={!!shape.italic} onActivate={() => onChange({ italic: !shape.italic })} ariaLabel="Italic" />
@@ -1110,6 +1497,14 @@ function Inspector({
               ✎
             </button>
             <button
+              onClick={onDuplicate}
+              className="h-11 min-w-11 px-3 rounded-xl hover:bg-slate-100 text-sm"
+              aria-label="Duplicate"
+              title="Duplicate (Cmd/Ctrl+D)"
+            >
+              ⎘
+            </button>
+            <button
               onClick={onDelete}
               className="h-11 min-w-11 px-3 rounded-xl hover:bg-red-50 text-red-600 text-sm"
               aria-label="Delete shape"
@@ -1117,7 +1512,6 @@ function Inspector({
               🗑
             </button>
           </div>
-          {/* Row 2: fill colors */}
           <div className="flex items-center gap-1.5 px-1">
             <span className="text-[10px] uppercase tracking-wide text-slate-400 w-8 shrink-0">Fill</span>
             <div className="flex flex-wrap gap-1.5">
@@ -1132,7 +1526,6 @@ function Inspector({
               ))}
             </div>
           </div>
-          {/* Row 3: highlight colors (only when highlight is on) */}
           {shape.highlight && (
             <div className="flex items-center gap-1.5 px-1">
               <span className="text-[10px] uppercase tracking-wide text-slate-400 w-8 shrink-0">Hi</span>

@@ -1,4 +1,5 @@
 export type ShapeKind = "rect" | "ellipse" | "diamond" | "text";
+export type Anchor = "top" | "right" | "bottom" | "left";
 
 export interface Shape {
   id: string;
@@ -21,6 +22,8 @@ export interface Edge {
   id: string;
   from: string;
   to: string;
+  fromAnchor?: Anchor;
+  toAnchor?: Anchor;
 }
 
 export interface Board {

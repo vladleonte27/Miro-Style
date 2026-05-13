@@ -38,14 +38,22 @@ npm run dev
 - **Pan**: one-finger drag on empty space.
 - **Zoom**: pinch (or scroll wheel on desktop).
 - **Add shape**: bottom toolbar → **+ Shape** → pick a kind.
-- **Select**: tap a shape. You'll see resize handles at the corners (sky-blue) and **4 indigo dots** at the edge midpoints.
-- **Move**: drag selected shape.
-- **Resize**: drag a corner handle (large hit areas for thumbs).
-- **Connect (fast)**: drag from one of the 4 indigo dots onto another shape — release on the target (it'll glow green) to wire it up. A dashed indigo line follows your finger so you see what's about to happen.
-- **Connect (tap-tap)**: bottom toolbar → **↔ Connect** → tap source, tap target. Useful for shapes far apart.
-- **Edit text**: double-tap a shape, or select → tap **✎**. While editing you get a floating top bar with **B / I / H / A− / A+ / Done**. Changes preview live in the textarea and on the shape underneath.
-- **Format without editing**: with a shape selected, the inspector at the bottom gives you **B / I / H / A− / A+**, color swatches, **✎**, **🗑** — all in one row + a swatches row.
+- **Select**: tap a shape. Resize handles (sky-blue squares) appear at corners; 4 indigo connection dots at edge midpoints.
+- **Move**: drag the shape. Pink alignment guides snap it to other shapes' edges and centers.
+- **Resize**: drag a corner.
+- **Connect (anchored)**: drag from one indigo dot onto another shape. The line emerges out of that exact edge (top dot → curve goes up first; bottom dot → curve goes down first). As you hover a target shape, the nearest target anchor highlights **green** — release to lock to that anchor. Edges are curved bezier paths with arrowheads, and each end remembers which side of its shape it's attached to.
+- **Connect (tap-tap)**: toolbar → **↔ Connect** → tap source, tap target. Endpoints are auto-chosen.
+- **Edit text**: double-tap, or select → **✎**. WYSIWYG: the textarea has the same bg, font, weight, italic, line-height, and clip-path as the rendered shape, so what you type *is* what you'll see.
+- **Format**: **B / I / H** toggles, **A− / A+** font size with a live readout, fill swatches, and highlight swatches (when H is on). Same controls appear in both the selection inspector and the editing top bar.
+- **Undo / Redo**: floating ↶ ↷ pill in the canvas top-left. Keyboard: **Cmd/Ctrl+Z**, **Cmd/Ctrl+Shift+Z**.
+- **Duplicate shape**: ⎘ in the inspector, or **Cmd/Ctrl+D**.
+- **Delete shape**: 🗑 in the inspector, or **Delete/Backspace** with a shape selected.
 - **Delete board**: top-right **⋮** menu.
+
+### Mindmaps
+- Generated mindmaps lay out **top-down**: root at the top, branches below.
+- After import, the canvas auto-fits and zooms to frame the new tree.
+- Every node is a regular shape — drag, recolor, resize, change font, attach more connections.
 
 ### Mindmap import (the magic part)
 

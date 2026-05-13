@@ -8,16 +8,16 @@ export interface MindmapNode {
 
 const DEPTH_FILLS = ["#fde68a", "#bfdbfe", "#bbf7d0", "#fbcfe8", "#ddd6fe", "#fed7aa"];
 
-const NODE_W = 200;
-const NODE_H = 56;
-const GAP_X = 80;
-const GAP_Y = 18;
+const NODE_W = 184;
+const NODE_H = 64;
+const GAP_X = 24; // horizontal between sibling subtrees
+const GAP_Y = 84; // vertical between levels
 
-function measure(node: MindmapNode): number {
+function measureWidth(node: MindmapNode): number {
   const children = node.children ?? [];
-  if (!children.length) return NODE_H;
-  const total = children.reduce((s, c) => s + measure(c), 0) + (children.length - 1) * GAP_Y;
-  return Math.max(NODE_H, total);
+  if (!children.length) return NODE_W;
+  const total = children.reduce((sum, c) => sum + measureWidth(c), 0) + (children.length - 1) * GAP_X;
+  return Math.max(NODE_W, total);
 }
 
 export function layoutMindmap(
@@ -29,27 +29,35 @@ export function layoutMindmap(
   const edges: Edge[] = [];
 
   function place(node: MindmapNode, x: number, y: number, depth: number): string {
-    const height = measure(node);
-    const cy = y + height / 2;
+    const width = measureWidth(node);
+    const cx = x + width / 2;
     const id = newId("s_");
     shapes.push({
       id,
       kind: depth === 0 ? "ellipse" : "rect",
-      x,
-      y: cy - NODE_H / 2,
+      x: cx - NODE_W / 2,
+      y,
       w: NODE_W,
       h: NODE_H,
       text: node.label,
       fill: DEPTH_FILLS[depth % DEPTH_FILLS.length],
       stroke: "#1f2937",
+      bold: depth === 0,
+      fontSize: depth === 0 ? 16 : 14,
     });
 
-    let cursor = y;
+    let cursor = x;
     for (const child of node.children ?? []) {
-      const ch = measure(child);
-      const childId = place(child, x + NODE_W + GAP_X, cursor, depth + 1);
-      edges.push({ id: newId("e_"), from: id, to: childId });
-      cursor += ch + GAP_Y;
+      const cw = measureWidth(child);
+      const childId = place(child, cursor, y + NODE_H + GAP_Y, depth + 1);
+      edges.push({
+        id: newId("e_"),
+        from: id,
+        to: childId,
+        fromAnchor: "bottom",
+        toAnchor: "top",
+      });
+      cursor += cw + GAP_X;
     }
     return id;
   }
