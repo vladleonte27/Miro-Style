@@ -29,7 +29,8 @@ type TextStyleKey = "h1" | "h2" | "h3" | "body";
 type Drag =
   | { kind: "none" }
   | { kind: "pan"; startSx: number; startSy: number; startTx: number; startTy: number }
-  | { kind: "move"; id: string; startSx: number; startSy: number; origX: number; origY: number; w: number; h: number; scale: number; moved: boolean }
+  | { kind: "move"; ids: string[]; primaryId: string; startSx: number; startSy: number; origPositions: Map<string, { x: number; y: number }>; w: number; h: number; scale: number; moved: boolean }
+  | { kind: "marquee"; startBx: number; startBy: number; additive: boolean; baseIds: string[] }
   | { kind: "resize"; id: string; corner: Corner; orig: Shape; startSx: number; startSy: number; scale: number }
   | { kind: "pinch"; initialDist: number; initialScale: number; initialTx: number; initialTy: number; centerSx: number; centerSy: number }
   | { kind: "connecting"; fromId: string; fromAnchor: Anchor };
@@ -258,10 +259,12 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
   const [board, setBoard] = useState<Board | null | undefined>(undefined);
   const [shapes, setShapes] = useState<Shape[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>("select");
+  const [multiMode, setMultiMode] = useState(false);
+  const [marquee, setMarquee] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   const [edgeFromId, setEdgeFromId] = useState<string | null>(null);
   const [viewport, setViewport] = useState<Viewport>({ tx: 0, ty: 0, scale: 1 });
   const [importOpen, setImportOpen] = useState(false);
@@ -346,7 +349,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     if (futureRef.current.length > HISTORY_LIMIT) futureRef.current.pop();
     setShapes(prev.shapes);
     setEdges(prev.edges);
-    setSelectedId(null);
+    setSelectedIds([]);
     setSelectedEdgeId(null);
     setEditingId(null);
     setHistoryVersion((v) => v + 1);
@@ -359,7 +362,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     if (historyRef.current.length > HISTORY_LIMIT) historyRef.current.shift();
     setShapes(next.shapes);
     setEdges(next.edges);
-    setSelectedId(null);
+    setSelectedIds([]);
     setSelectedEdgeId(null);
     setEditingId(null);
     setHistoryVersion((v) => v + 1);
@@ -447,13 +450,47 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
         const dxBoard = (sx - d.startSx) / d.scale;
         const dyBoard = (sy - d.startSy) / d.scale;
         if (Math.abs(dxBoard) + Math.abs(dyBoard) > 1) d.moved = true;
-        const candidateX = d.origX + dxBoard;
-        const candidateY = d.origY + dyBoard;
-        const others = shapesRef.current.filter((s) => s.id !== d.id);
+        // Snap based on the primary shape's bounding box. The whole group
+        // shifts by the post-snap delta of the primary.
+        const primaryOrig = d.origPositions.get(d.primaryId)!;
+        const candidateX = primaryOrig.x + dxBoard;
+        const candidateY = primaryOrig.y + dyBoard;
+        const groupSet = new Set(d.ids);
+        const others = shapesRef.current.filter((s) => !groupSet.has(s.id));
         const threshold = SNAP_PX / d.scale;
         const snapped = computeSnap(candidateX, candidateY, d.w, d.h, others, threshold);
-        setShapes((ss) => ss.map((s) => (s.id === d.id ? { ...s, x: snapped.x, y: snapped.y } : s)));
+        const finalDx = snapped.x - primaryOrig.x;
+        const finalDy = snapped.y - primaryOrig.y;
+        setShapes((ss) =>
+          ss.map((sh) => {
+            const orig = d.origPositions.get(sh.id);
+            if (!orig) return sh;
+            return { ...sh, x: orig.x + finalDx, y: orig.y + finalDy };
+          }),
+        );
         setSnapGuides({ x: snapped.guideX, y: snapped.guideY });
+        return;
+      }
+      if (d.kind === "marquee") {
+        const vp = viewportRef.current;
+        const bx = (sx - vp.tx) / vp.scale;
+        const by = (sy - vp.ty) / vp.scale;
+        const x = Math.min(d.startBx, bx);
+        const y = Math.min(d.startBy, by);
+        const w = Math.abs(bx - d.startBx);
+        const h = Math.abs(by - d.startBy);
+        setMarquee({ x, y, w, h });
+        // Shapes whose bounding boxes intersect the marquee.
+        const hit: string[] = [];
+        for (const s of shapesRef.current) {
+          if (s.x + s.w >= x && s.x <= x + w && s.y + s.h >= y && s.y <= y + h) {
+            hit.push(s.id);
+          }
+        }
+        const merged = d.additive
+          ? Array.from(new Set([...d.baseIds, ...hit]))
+          : hit;
+        setSelectedIds(merged);
         return;
       }
       if (d.kind === "resize") {
@@ -558,6 +595,9 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
         setSnapGuides({ x: null, y: null });
         commitPreDrag();
       }
+      if (d.kind === "marquee") {
+        setMarquee(null);
+      }
       if (d.kind === "pinch" && pointersRef.current.size < 2) {
         dragRef.current = { kind: "none" };
       } else if (pointersRef.current.size === 0) {
@@ -576,13 +616,15 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     };
   }, [pushHistory]);
 
-  const deleteShape = useCallback((id: string) => {
+  const deleteSelected = useCallback(() => {
+    if (selectedIds.length === 0) return;
     pushHistory(snapshot());
-    setShapes((s) => s.filter((x) => x.id !== id));
-    setEdges((es) => es.filter((x) => x.from !== id && x.to !== id));
-    setSelectedId((sel) => (sel === id ? null : sel));
-    setEditingId((ed) => (ed === id ? null : ed));
-  }, [pushHistory, snapshot]);
+    const idSet = new Set(selectedIds);
+    setShapes((s) => s.filter((x) => !idSet.has(x.id)));
+    setEdges((es) => es.filter((x) => !idSet.has(x.from) && !idSet.has(x.to)));
+    setSelectedIds([]);
+    setEditingId((ed) => (ed && idSet.has(ed) ? null : ed));
+  }, [pushHistory, snapshot, selectedIds]);
 
   const deleteEdge = useCallback((id: string) => {
     pushHistory(snapshot());
@@ -590,14 +632,39 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     setSelectedEdgeId((sel) => (sel === id ? null : sel));
   }, [pushHistory, snapshot]);
 
-  const duplicateShape = useCallback((id: string) => {
-    const src = shapesRef.current.find((s) => s.id === id);
-    if (!src) return;
+  const duplicateSelected = useCallback(() => {
+    if (selectedIds.length === 0) return;
     pushHistory(snapshot());
-    const copy: Shape = { ...src, id: newId("s_"), x: src.x + 24, y: src.y + 24 };
-    setShapes((ss) => [...ss, copy]);
-    setSelectedId(copy.id);
-  }, [pushHistory, snapshot]);
+    const idMap = new Map<string, string>();
+    const newShapes: Shape[] = [];
+    for (const id of selectedIds) {
+      const src = shapesRef.current.find((s) => s.id === id);
+      if (!src) continue;
+      const nid = newId("s_");
+      idMap.set(id, nid);
+      newShapes.push({ ...src, id: nid, x: src.x + 24, y: src.y + 24 });
+    }
+    // Clone edges that connect *within* the duplicated set.
+    const newEdges: Edge[] = [];
+    for (const e of edgesRef.current) {
+      const f = idMap.get(e.from);
+      const t = idMap.get(e.to);
+      if (f && t) newEdges.push({ ...e, id: newId("e_"), from: f, to: t });
+    }
+    setShapes((ss) => [...ss, ...newShapes]);
+    setEdges((es) => [...es, ...newEdges]);
+    setSelectedIds(newShapes.map((s) => s.id));
+  }, [pushHistory, snapshot, selectedIds]);
+
+  const updateSelectedShapes = useCallback(
+    (patch: Partial<Shape>, opts?: { history?: boolean }) => {
+      if (selectedIds.length === 0) return;
+      if (opts?.history !== false) pushHistory(snapshot());
+      const idSet = new Set(selectedIds);
+      setShapes((ss) => ss.map((s) => (idSet.has(s.id) ? { ...s, ...patch } : s)));
+    },
+    [pushHistory, snapshot, selectedIds],
+  );
 
   const addImageFromFile = useCallback(async (file: File, bx: number, by: number) => {
     if (!file.type.startsWith("image/")) return;
@@ -634,7 +701,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
         src: result.src,
       };
       setShapes((ss) => [...ss, s]);
-      setSelectedId(s.id);
+      setSelectedIds([s.id]);
       setSelectedEdgeId(null);
     } catch (err) {
       console.error("Image load failed", err);
@@ -659,18 +726,25 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
         redo();
         return;
       }
-      if (cmd && e.key.toLowerCase() === "d" && selectedId) {
+      if (cmd && e.key.toLowerCase() === "d" && selectedIds.length > 0) {
         if (tag === "INPUT" || tag === "TEXTAREA" || isEditable) return;
         e.preventDefault();
-        duplicateShape(selectedId);
+        duplicateSelected();
+        return;
+      }
+      if (cmd && e.key.toLowerCase() === "a") {
+        if (tag === "INPUT" || tag === "TEXTAREA" || isEditable) return;
+        e.preventDefault();
+        setSelectedIds(shapesRef.current.map((s) => s.id));
+        setSelectedEdgeId(null);
         return;
       }
       if (editingId) return;
       if (tag === "INPUT" || tag === "TEXTAREA" || isEditable) return;
       if (e.key === "Delete" || e.key === "Backspace") {
-        if (selectedId) {
+        if (selectedIds.length > 0) {
           e.preventDefault();
-          deleteShape(selectedId);
+          deleteSelected();
         } else if (selectedEdgeId) {
           e.preventDefault();
           deleteEdge(selectedEdgeId);
@@ -678,13 +752,14 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       } else if (e.key === "Escape") {
         setMode("select");
         setEdgeFromId(null);
-        setSelectedId(null);
+        setSelectedIds([]);
         setSelectedEdgeId(null);
+        setMultiMode(false);
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selectedId, selectedEdgeId, editingId, undo, redo, deleteShape, deleteEdge, duplicateShape]);
+  }, [selectedIds, selectedEdgeId, editingId, undo, redo, deleteSelected, deleteEdge, duplicateSelected]);
 
   function trySwitchToPinch(): boolean {
     if (pointersRef.current.size < 2) return false;
@@ -757,7 +832,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       fontSize: d.fontSize,
     };
     setShapes((ss) => [...ss, s]);
-    setSelectedId(s.id);
+    setSelectedIds([s.id]);
     setSelectedEdgeId(null);
     setAddOpen(false);
   }
@@ -782,7 +857,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       textAlign: "left",
     };
     setShapes((ss) => [...ss, s]);
-    setSelectedId(s.id);
+    setSelectedIds([s.id]);
     setSelectedEdgeId(null);
   }
 
@@ -806,7 +881,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       linkProvider: preview.provider,
     };
     setShapes((ss) => [...ss, s]);
-    setSelectedId(s.id);
+    setSelectedIds([s.id]);
     setSelectedEdgeId(null);
   }
 
@@ -836,31 +911,50 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       }
       return;
     }
-    setSelectedId(s.id);
+    // Shift-click or multi-mode toggles membership without starting a drag.
+    if (e.shiftKey || multiMode) {
+      setSelectedIds((prev) =>
+        prev.includes(s.id) ? prev.filter((x) => x !== s.id) : [...prev, s.id],
+      );
+      setSelectedEdgeId(null);
+      return;
+    }
+    // Drag the existing group if the shape is part of it; otherwise replace.
+    const dragIds = selectedIds.includes(s.id) && selectedIds.length > 1
+      ? selectedIds.slice()
+      : [s.id];
+    if (!selectedIds.includes(s.id) || selectedIds.length !== 1) {
+      setSelectedIds(dragIds);
+    }
     setSelectedEdgeId(null);
+    const origPositions = new Map<string, { x: number; y: number }>();
+    for (const id of dragIds) {
+      const sh = shapesRef.current.find((x) => x.id === id);
+      if (sh) origPositions.set(id, { x: sh.x, y: sh.y });
+    }
     const rect = svgRef.current!.getBoundingClientRect();
     preDragRef.current = snapshot();
     dragRef.current = {
       kind: "move",
-      id: s.id,
+      ids: dragIds,
+      primaryId: s.id,
+      origPositions,
       startSx: e.clientX - rect.left,
       startSy: e.clientY - rect.top,
-      origX: s.x,
-      origY: s.y,
       w: s.w,
       h: s.h,
       scale: viewportRef.current.scale,
       moved: false,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editingId, mode, edgeFromId, pushHistory, snapshot]);
+  }, [editingId, mode, edgeFromId, pushHistory, snapshot, multiMode, selectedIds]);
 
   const onShapeDoubleClick = useCallback((id: string) => {
     const s = shapesRef.current.find((sh) => sh.id === id);
     if (!s || s.kind === "image" || s.kind === "link") return; // cards don't have editable text
     pushHistory(snapshot());
     setEditingId(id);
-    setSelectedId(id);
+    setSelectedIds([id]);
     setSelectedEdgeId(null);
   }, [pushHistory, snapshot]);
 
@@ -869,16 +963,37 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (trySwitchToPinch()) return;
 
-    setSelectedId(null);
-    setSelectedEdgeId(null);
     setAddOpen(false);
     setMenuOpen(false);
     if (mode === "connect") {
+      setSelectedIds([]);
+      setSelectedEdgeId(null);
       setEdgeFromId(null);
       setMode("select");
       return;
     }
     const rect = svgRef.current!.getBoundingClientRect();
+
+    // Shift or multiMode → start marquee select. Otherwise pan + deselect.
+    if (e.shiftKey || multiMode) {
+      const sx = e.clientX - rect.left;
+      const sy = e.clientY - rect.top;
+      const vp = viewportRef.current;
+      const bx = (sx - vp.tx) / vp.scale;
+      const by = (sy - vp.ty) / vp.scale;
+      dragRef.current = {
+        kind: "marquee",
+        startBx: bx,
+        startBy: by,
+        additive: e.shiftKey,
+        baseIds: e.shiftKey ? selectedIds.slice() : [],
+      };
+      setMarquee({ x: bx, y: by, w: 0, h: 0 });
+      if (!e.shiftKey) setSelectedEdgeId(null);
+      return;
+    }
+    setSelectedIds([]);
+    setSelectedEdgeId(null);
     dragRef.current = {
       kind: "pan",
       startSx: e.clientX - rect.left,
@@ -925,7 +1040,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
   function onEdgePointerDown(e: React.PointerEvent, edgeId: string) {
     e.stopPropagation();
     if (editingId) setEditingId(null);
-    setSelectedId(null);
+    setSelectedIds([]);
     setSelectedEdgeId(edgeId);
   }
 
@@ -1036,7 +1151,9 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     );
   }
 
-  const selected = selectedId ? shapesById.get(selectedId) ?? null : null;
+  const primarySelectedId = selectedIds.length === 1 ? selectedIds[0] : null;
+  const selected = primarySelectedId ? shapesById.get(primarySelectedId) ?? null : null;
+  const multiSelected = selectedIds.length > 1;
   const editing = editingId ? shapesById.get(editingId) ?? null : null;
   const selectedEdgeMid =
     selectedEdgeId && !editing
@@ -1145,6 +1262,20 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
               );
             })}
 
+            {marquee && (
+              <rect
+                x={marquee.x}
+                y={marquee.y}
+                width={marquee.w}
+                height={marquee.h}
+                fill="rgba(14,165,233,0.10)"
+                stroke="#0ea5e9"
+                strokeWidth={1.5}
+                strokeDasharray="6 4"
+                vectorEffect="non-scaling-stroke"
+                pointerEvents="none"
+              />
+            )}
             {snapGuides.x !== null && (
               <line
                 x1={snapGuides.x} y1={-1e6} x2={snapGuides.x} y2={1e6}
@@ -1190,7 +1321,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
               <ShapeNode
                 key={s.id}
                 shape={s}
-                selected={s.id === selectedId}
+                selected={selectedIds.includes(s.id)}
                 editing={s.id === editingId}
                 connectSource={s.id === edgeFromId || s.id === connectPreview?.fromId}
                 connectTarget={s.id === connectPreview?.targetId}
@@ -1316,12 +1447,19 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
           </div>
         </div>
 
-        {selected && !editing ? (
+        {multiSelected && !editing ? (
+          <MultiInspector
+            count={selectedIds.length}
+            onChange={(patch) => updateSelectedShapes(patch)}
+            onDuplicate={() => duplicateSelected()}
+            onDelete={() => deleteSelected()}
+          />
+        ) : selected && !editing ? (
           selected.kind === "image" ? (
             <ImageInspector
               shape={selected}
-              onDuplicate={() => duplicateShape(selected.id)}
-              onDelete={() => deleteShape(selected.id)}
+              onDuplicate={() => duplicateSelected()}
+              onDelete={() => deleteSelected()}
             />
           ) : selected.kind === "link" ? (
             <LinkInspector
@@ -1331,8 +1469,8 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
                   window.open(selected.href, "_blank", "noopener,noreferrer");
                 }
               }}
-              onDuplicate={() => duplicateShape(selected.id)}
-              onDelete={() => deleteShape(selected.id)}
+              onDuplicate={() => duplicateSelected()}
+              onDelete={() => deleteSelected()}
             />
           ) : (
             <Inspector
@@ -1340,8 +1478,8 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
               onChange={(patch) => updateShape(selected.id, patch)}
               onBump={(delta) => bumpFontSize(selected.id, delta)}
               onStyle={(s) => applyTextStyle(selected.id, s)}
-              onDelete={() => deleteShape(selected.id)}
-              onDuplicate={() => duplicateShape(selected.id)}
+              onDelete={() => deleteSelected()}
+              onDuplicate={() => duplicateSelected()}
               onEditText={() => onShapeDoubleClick(selected.id)}
             />
           )
@@ -1350,9 +1488,11 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
             <BottomToolbar
               mode={mode}
               addOpen={addOpen}
+              multiMode={multiMode}
               onToggleAdd={() => setAddOpen((v) => !v)}
               onAdd={addShape}
               onToggleConnect={() => setMode((m) => (m === "connect" ? "select" : "connect"))}
+              onToggleMulti={() => setMultiMode((v) => !v)}
               onImport={() => setImportOpen(true)}
             />
           )
@@ -2161,16 +2301,20 @@ function EditingTopBar({
 function BottomToolbar({
   mode,
   addOpen,
+  multiMode,
   onToggleAdd,
   onAdd,
   onToggleConnect,
+  onToggleMulti,
   onImport,
 }: {
   mode: Mode;
   addOpen: boolean;
+  multiMode: boolean;
   onToggleAdd: () => void;
   onAdd: (k: AddItem) => void;
   onToggleConnect: () => void;
+  onToggleMulti: () => void;
   onImport: () => void;
 }) {
   const items: { k: AddItem; label: string; icon: IconName }[] = [
@@ -2226,12 +2370,78 @@ function BottomToolbar({
             Connect
           </button>
           <button
+            onClick={onToggleMulti}
+            className={`h-11 min-w-11 px-2 rounded-xl text-sm font-medium flex items-center justify-center ${
+              multiMode ? "bg-slate-900 text-white" : "text-slate-700 hover:bg-slate-100"
+            }`}
+            aria-pressed={multiMode}
+            title="Multi-select: tap shapes to add; drag empty space to lasso"
+          >
+            <Icon name="multi" size={18} />
+          </button>
+          <button
             onClick={onImport}
             className="h-11 px-3 rounded-xl text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-700 flex items-center gap-1.5"
           >
             <Icon name="clipboard" size={18} />
             Import
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MultiInspector({
+  count,
+  onChange,
+  onDuplicate,
+  onDelete,
+}: {
+  count: number;
+  onChange: (p: Partial<Shape>) => void;
+  onDuplicate: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div
+      className="absolute left-2 right-2 bottom-0 z-10 pointer-events-none"
+      style={{ paddingBottom: "max(8px, env(safe-area-inset-bottom))" }}
+    >
+      <div className="flex justify-center">
+        <div className="pointer-events-auto bg-white border shadow-lg rounded-2xl p-2 w-full max-w-md flex flex-col gap-2">
+          <div className="flex items-center gap-1">
+            <div className="px-3 text-xs text-slate-500 flex items-center gap-1.5">
+              <Icon name="multi" size={14} />
+              {count} selected
+            </div>
+            <div className="flex-1" />
+            <IconBtn icon="copy" onClick={onDuplicate} ariaLabel="Duplicate" title="Duplicate (Cmd/Ctrl+D)" />
+            <IconBtn icon="trash" onClick={onDelete} ariaLabel="Delete" variant="danger" />
+          </div>
+          <div className="flex items-center gap-1 flex-wrap">
+            <ToggleBtn icon="bold" active={false} onActivate={() => onChange({ bold: true })} ariaLabel="Bold" />
+            <ToggleBtn icon="italic" active={false} onActivate={() => onChange({ italic: true })} ariaLabel="Italic" />
+            <ToggleBtn icon="highlighter" active={false} onActivate={() => onChange({ highlight: true })} ariaLabel="Highlight" />
+            <div className="w-px h-6 bg-slate-200 mx-0.5" />
+            <ToggleBtn icon="align-left" active={false} onActivate={() => onChange({ textAlign: "left" })} ariaLabel="Align left" />
+            <ToggleBtn icon="align-center" active={false} onActivate={() => onChange({ textAlign: "center" })} ariaLabel="Align center" />
+            <ToggleBtn icon="align-right" active={false} onActivate={() => onChange({ textAlign: "right" })} ariaLabel="Align right" />
+          </div>
+          <div className="flex items-center gap-1.5 px-1">
+            <span className="text-[10px] uppercase tracking-wide text-slate-400 w-8 shrink-0">Fill</span>
+            <div className="flex flex-wrap gap-1.5">
+              {SWATCHES.map((c) => (
+                <button
+                  key={c}
+                  onClick={() => onChange({ fill: c })}
+                  className="w-7 h-7 rounded-full border"
+                  style={{ background: c }}
+                  aria-label={`Fill ${c}`}
+                />
+              ))}
+            </div>
+          </div>
         </div>
       </div>
     </div>

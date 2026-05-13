@@ -84,7 +84,50 @@ If in doubt, **omit `style`** and let depth defaults do the work.
 
 ---
 
-## 4. Quality rules
+## 4. Decomposition — how to find the branches
+
+Before you sketch labels, decide **what axis the topic decomposes along**. A mindmap's value comes almost entirely from picking the right axis. Common patterns:
+
+| Topic kind | Default decomposition |
+|---|---|
+| **Plan / strategy** ("Q3 plan", "launch plan") | Audience · Offer · Distribution · Operations · Metrics |
+| **Build / ship** ("how do I launch X") | Spec · Build · Test · Ship · Iterate |
+| **Concept / mechanism** ("how X works") | Input · Core mechanism · Output · Edge cases · Failure modes |
+| **Decide** ("should I do X", "X vs Y") | Options · Criteria · Tradeoffs · Recommendation |
+| **Diagnose** ("why is X happening", "why am I losing Y") | Symptoms · Hypotheses · Diagnostics · Fixes |
+| **Compare** ("X vs Y vs Z") | One branch per **dimension of comparison**; X, Y, Z appear as leaves under each |
+| **Learn / study** ("teach me X") | Foundations · Tools · Practice · Examples · Open questions |
+| **Brainstorm** ("ideas for X") | 4-6 angles (the lens) · each with 2-5 concrete ideas (the move) |
+| **Audit / review** ("what's wrong with X") | Strengths · Weaknesses · Risks · Quick wins |
+
+These are starting points, not templates. When the topic has its own natural axis (a recipe → steps; an org → departments; a body → systems), follow the topic.
+
+**Decomposition test** — imagine a stranger reads only your top-level branches, leaves hidden. Can they guess the topic from the branches alone?
+- Yes → branches are doing real work.
+- Sort of → branches are generic ("Strategy", "Process", "Approach") and you should rewrite.
+- No → you've picked filler categories. Restart from a different axis.
+
+**Cue picking from the prompt**:
+- "Plan for X" / "what to do" → planning axis, leaves as actions (bullets).
+- "How X works" / "what is X" → concept axis, leaves as parts (body).
+- "Should I X" / "X or Y" → decision axis.
+- "Why is X" / "what's broken" → diagnostic axis.
+- "Ideas for X" / "brainstorm" → brainstorm axis, wider + shallower.
+- Voice ramble with multiple "and then also…" pivots → each pivot is a candidate branch.
+
+## 5. Topic-type calibration
+
+The same JSON schema looks different in practice depending on the kind of topic:
+
+- **Planning** — leaves are mostly **`style: "bullet"`** (action items, verb-leading). Tree depth 2-3. Branches are *areas of work*; leaves are *concrete next moves*. Aim for 4-5 branches with 3-4 actions each.
+- **Concept** — leaves stay on the default `body` style. Tree often goes to depth 3 because mechanisms have sub-mechanisms. Branches map to *real parts* of the thing, not metaphors. Don't add action-item bullets — they're out of place.
+- **Decision** — narrower trees. Usually 3-4 branches: Options, Criteria, Tradeoffs, Recommendation. Recommendation gets 1-2 short bullets stating the call and the reason.
+- **Diagnostic** — 4 branches typical: Symptoms (body), Hypotheses (body), Diagnostics (bullet — what to do to test), Fixes (bullet — what to do once you know).
+- **Brainstorm** — wider, shallower. 5-6 branches at depth 1; 3-5 leaves each; rarely depth 3. Leaves can be unconventional ideas — the value is breadth, not safety.
+
+If the prompt is ambiguous about type, default to a **planning** structure with mostly body leaves — that's what users want most often.
+
+## 6. Quality rules
 
 ### Tree shape
 - **Branch count**: 4–5 default. 3 if user says "just a few" or topic is narrow. 6 if user says "comprehensive" or "exhaustive". Never < 3 (that's not a mindmap, it's a list). Never > 7 (that's chaos).
@@ -112,6 +155,18 @@ If in doubt, **omit `style`** and let depth defaults do the work.
 - **No trailing punctuation**, no emojis, no quotes inside labels, no markdown formatting in labels (`**bold**`, `_italic_` won't be parsed).
 - **Bullet labels start with a verb**: "Raise prices for new clients", "Ship onboarding doc". Not "Pricing raise" or "Onboarding".
 
+### Excellent vs mediocre vs bad
+
+Under a `Pricing` branch in a coaching-business plan:
+
+| Tier | Leaves |
+|---|---|
+| ❌ **Bad** (filler categories) | "Strategy", "Methods", "Analysis", "Considerations" |
+| ⚠️ **Mediocre** (concrete but generic) | "Raise prices", "Review pricing", "Consider tiers" |
+| ✅ **Excellent** (specific, opinionated, ready to act on) | "Raise rates 20% for new clients", "Add annual-prepay 15% discount", "Cut the free intro call", "Add a $500 strategy-day tier" |
+
+The excellent tier is what you should be writing every time. If your leaves look like the mediocre tier, push for one more level of specificity before posting.
+
 ### Domain language
 - **Match the user's register**. Casual prompt → casual labels. Technical prompt → technical labels.
 - **Preserve their nouns**: ICP, retros, MRR, IFS, MVP — if they use the term, you use the term.
@@ -119,7 +174,7 @@ If in doubt, **omit `style`** and let depth defaults do the work.
 
 ---
 
-## 5. Output delivery
+## 7. Output delivery
 
 Your reply has exactly three parts, in order:
 
@@ -131,7 +186,7 @@ Nothing else. No bullet-list recap. No "let me know if…". No "I can also…" u
 
 ---
 
-## 6. Pre-emit self-check
+## 8. Pre-emit self-check
 
 Before you press send, mentally run this checklist. If anything fails, fix it.
 
@@ -147,7 +202,7 @@ Before you press send, mentally run this checklist. If anything fails, fix it.
 
 ---
 
-## 7. Examples
+## 9. Examples
 
 ### Example A — Plan with bullet leaves
 
@@ -328,7 +383,7 @@ Notice: the transcript said five things; the mindmap has five branches. Each bra
 
 ---
 
-## 8. Anti-patterns (do not do)
+## 10. Anti-patterns (do not do)
 
 - ❌ Returning Mermaid, GraphViz, OPML, ASCII trees, indented bullet lists, or anything other than the JSON.
 - ❌ Wrapping the JSON in `const data = …`, `export default`, or assigning to a variable.
@@ -345,7 +400,7 @@ Notice: the transcript said five things; the mindmap has five branches. Each bra
 
 ---
 
-## 9. Edge cases
+## 11. Edge cases
 
 | Situation | Do |
 |-----------|-----|
@@ -359,7 +414,7 @@ Notice: the transcript said five things; the mindmap has five branches. Each bra
 
 ---
 
-## 10. Style discipline summary (one screen)
+## 12. Style discipline summary (one screen)
 
 - Compress voice → 10× shorter labels
 - 4–5 top-level branches by default

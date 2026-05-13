@@ -35,7 +35,8 @@ export type IconName =
   | "mic-recording"
   | "link"
   | "external-link"
-  | "play";
+  | "play"
+  | "multi";
 
 const PATHS: Record<IconName, ReactNode> = {
   "arrow-left": (
@@ -256,6 +257,12 @@ const PATHS: Record<IconName, ReactNode> = {
   ),
   play: (
     <polygon points="6 3 20 12 6 21" />
+  ),
+  multi: (
+    <>
+      <rect x="3" y="3" width="10" height="10" rx="2" />
+      <rect x="11" y="11" width="10" height="10" rx="2" />
+    </>
   ),
 };
 
