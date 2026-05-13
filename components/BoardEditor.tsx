@@ -30,7 +30,7 @@ type Drag =
   | { kind: "none" }
   | { kind: "pan"; startSx: number; startSy: number; startTx: number; startTy: number }
   | { kind: "move"; ids: string[]; primaryId: string; startSx: number; startSy: number; origPositions: Map<string, { x: number; y: number }>; w: number; h: number; scale: number; moved: boolean }
-  | { kind: "marquee"; startBx: number; startBy: number; additive: boolean; baseIds: string[] }
+  | { kind: "marquee"; startBx: number; startBy: number; additive: boolean; baseIds: string[]; moved: boolean; clickToggle: boolean }
   | { kind: "resize"; id: string; corner: Corner; orig: Shape; startSx: number; startSy: number; scale: number }
   | { kind: "pinch"; initialDist: number; initialScale: number; initialTx: number; initialTy: number; centerSx: number; centerSy: number }
   | { kind: "connecting"; fromId: string; fromAnchor: Anchor };
@@ -394,7 +394,11 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       const sx = e.clientX - rect.left;
       const sy = e.clientY - rect.top;
       setViewport((v) => {
-        const factor = e.deltaY > 0 ? 1 / 1.1 : 1.1;
+        // Exponential factor so trackpads feel smooth and mouse wheels still
+        // produce a noticeable step. ctrlKey wheel (pinch on macOS trackpad)
+        // gets a slightly larger coefficient for the same delta.
+        const k = e.ctrlKey ? 0.01 : 0.005;
+        const factor = Math.exp(-e.deltaY * k);
         const scale = clamp(v.scale * factor, 0.1, 4);
         const bx = (sx - v.tx) / v.scale;
         const by = (sy - v.ty) / v.scale;
@@ -491,12 +495,20 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
         const vp = viewportRef.current;
         const bx = (sx - vp.tx) / vp.scale;
         const by = (sy - vp.ty) / vp.scale;
+        // Don't drop the current selection until the pointer actually moves.
+        // A pure click (no movement) is handled in onEnd as deselect.
+        if (!d.moved) {
+          if (Math.abs(bx - d.startBx) + Math.abs(by - d.startBy) > 3 / vp.scale) {
+            d.moved = true;
+          } else {
+            return;
+          }
+        }
         const x = Math.min(d.startBx, bx);
         const y = Math.min(d.startBy, by);
         const w = Math.abs(bx - d.startBx);
         const h = Math.abs(by - d.startBy);
         setMarquee({ x, y, w, h });
-        // Shapes whose bounding boxes intersect the marquee.
         const hit: string[] = [];
         for (const s of shapesRef.current) {
           if (s.x + s.w >= x && s.x <= x + w && s.y + s.h >= y && s.y <= y + h) {
@@ -607,12 +619,31 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
         return;
       }
       pointersRef.current.delete(e.pointerId);
-      if (d.kind === "move" || d.kind === "resize") {
+      if (d.kind === "move") {
+        if (!d.moved && e.pointerType === "mouse") {
+          // Mouse click without drag → toggle in selection.
+          const id = d.primaryId;
+          setSelectedIds((prev) =>
+            prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+          );
+          setSelectedEdgeId(null);
+        } else if (d.moved && !selectedIdsRef.current.includes(d.primaryId)) {
+          setSelectedIds(d.ids);
+        }
+        setSnapGuides({ x: null, y: null });
+        commitPreDrag();
+      }
+      if (d.kind === "resize") {
         setSnapGuides({ x: null, y: null });
         commitPreDrag();
       }
       if (d.kind === "marquee") {
         setMarquee(null);
+        if (!d.moved && d.clickToggle) {
+          // Click on empty without drag → deselect all.
+          setSelectedIds([]);
+          setSelectedEdgeId(null);
+        }
       }
       if (d.kind === "pinch" && pointersRef.current.size < 2) {
         dragRef.current = { kind: "none" };
@@ -907,6 +938,24 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (trySwitchToPinch()) return;
 
+    const isMouse = e.pointerType === "mouse";
+
+    // Middle-mouse drag pans regardless of target.
+    if (isMouse && e.button === 1) {
+      e.preventDefault();
+      const rect = svgRef.current!.getBoundingClientRect();
+      dragRef.current = {
+        kind: "pan",
+        startSx: e.clientX - rect.left,
+        startSy: e.clientY - rect.top,
+        startTx: viewportRef.current.tx,
+        startTy: viewportRef.current.ty,
+      };
+      return;
+    }
+    // Non-primary mouse buttons (right, etc.) do nothing.
+    if (isMouse && e.button !== 0) return;
+
     if (mode === "connect") {
       if (!edgeFromId) {
         setEdgeFromId(s.id);
@@ -935,12 +984,14 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       setSelectedEdgeId(null);
       return;
     }
-    // Drag the existing group if the shape is part of it; otherwise replace.
+    // Drag the existing group if the shape is part of it; otherwise just this.
     const currentSel = selectedIdsRef.current;
     const dragIds = currentSel.includes(s.id) && currentSel.length > 1
       ? currentSel.slice()
       : [s.id];
-    if (!currentSel.includes(s.id) || currentSel.length !== 1) {
+    // Touch: pre-emptively replace selection on the tap (current UX).
+    // Mouse: defer to pointerup — a click (no drag) toggles, a drag moves.
+    if (!isMouse && (!currentSel.includes(s.id) || currentSel.length !== 1)) {
       setSelectedIds(dragIds);
     }
     setSelectedEdgeId(null);
@@ -989,10 +1040,29 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       setMode("select");
       return;
     }
+
+    const isMouse = e.pointerType === "mouse";
     const rect = svgRef.current!.getBoundingClientRect();
 
-    // Shift or multiMode → start marquee select. Otherwise pan + deselect.
-    if (e.shiftKey || multiMode) {
+    // Middle-mouse drag = pan.
+    if (isMouse && e.button === 1) {
+      e.preventDefault();
+      dragRef.current = {
+        kind: "pan",
+        startSx: e.clientX - rect.left,
+        startSy: e.clientY - rect.top,
+        startTx: viewport.tx,
+        startTy: viewport.ty,
+      };
+      return;
+    }
+    // Non-primary mouse buttons (right, etc.) ignored.
+    if (isMouse && e.button !== 0) return;
+
+    // Mouse left-click always begins a marquee with click-to-deselect
+    // semantics (no-drag click clears selection unless shift is held).
+    // Touch keeps the old behavior: marquee only when shift or multiMode.
+    if (isMouse || e.shiftKey || multiMode) {
       const sx = e.clientX - rect.left;
       const sy = e.clientY - rect.top;
       const vp = viewportRef.current;
@@ -1004,11 +1074,14 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
         startBy: by,
         additive: e.shiftKey,
         baseIds: e.shiftKey ? selectedIds.slice() : [],
+        moved: false,
+        clickToggle: !e.shiftKey,
       };
       setMarquee({ x: bx, y: by, w: 0, h: 0 });
       if (!e.shiftKey) setSelectedEdgeId(null);
       return;
     }
+    // Touch with no modifier: pan (and clear selection).
     setSelectedIds([]);
     setSelectedEdgeId(null);
     dragRef.current = {
@@ -1224,6 +1297,12 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
 
       <div
         className="relative flex-1 overflow-hidden canvas-bg"
+        style={{
+          // Pan the dot grid in lockstep with the canvas viewport and scale
+          // its spacing with zoom so dots track board coordinates.
+          backgroundSize: `${24 * viewport.scale}px ${24 * viewport.scale}px`,
+          backgroundPosition: `${viewport.tx}px ${viewport.ty}px`,
+        }}
         onDragOver={onContainerDragOver}
         onDragLeave={onContainerDragLeave}
         onDrop={onContainerDrop}
@@ -1623,7 +1702,9 @@ const ShapeNode = memo(function ShapeNode({
             style={{
               width: "100%",
               height: "100%",
-              borderRadius: "8%",
+              // Use a px value computed from the shorter side so corners stay
+              // truly circular regardless of the shape's aspect ratio.
+              borderRadius: `${cornerRadius}px`,
               overflow: "hidden",
               background: "#e2e8f0",
               boxSizing: "border-box",
@@ -2276,9 +2357,12 @@ function EditingTopBar({
           <ToggleBtn preventBlur icon="italic" active={!!shape.italic} onActivate={() => onToggle({ italic: !shape.italic })} ariaLabel="Italic" />
           <ToggleBtn preventBlur icon="highlighter" active={!!shape.highlight} onActivate={() => onToggle({ highlight: !shape.highlight })} ariaLabel="Highlight" />
           <div className="w-px h-6 bg-slate-200 mx-0.5" />
-          <IconBtn preventBlur icon="a-arrow-down" onClick={() => onBump(-FONT_STEP)} ariaLabel="Smaller text" />
-          <div className="px-1 text-xs text-slate-500 tabular-nums w-8 text-center">{effFontSize(shape)}</div>
-          <IconBtn preventBlur icon="a-arrow-up" onClick={() => onBump(FONT_STEP)} ariaLabel="Larger text" />
+          {/* Font-size group stays together */}
+          <div className="flex items-center gap-1">
+            <IconBtn preventBlur icon="a-arrow-down" onClick={() => onBump(-FONT_STEP)} ariaLabel="Smaller text" />
+            <div className="px-1 text-xs text-slate-500 tabular-nums w-8 text-center">{effFontSize(shape)}</div>
+            <IconBtn preventBlur icon="a-arrow-up" onClick={() => onBump(FONT_STEP)} ariaLabel="Larger text" />
+          </div>
           <div className="w-px h-6 bg-slate-200 mx-0.5" />
           <button
             onMouseDown={(e) => e.preventDefault()}
@@ -2290,8 +2374,12 @@ function EditingTopBar({
           </button>
         </div>
         <div className="pointer-events-auto bg-white border shadow-lg rounded-2xl p-1.5 flex items-center gap-1">
-          <TextStyleRow shape={shape} onStyle={onStyle} onToggle={onToggle} preventBlur />
-          <div className="w-px h-6 bg-slate-200 mx-0.5" />
+          {shape.kind === "text" && (
+            <>
+              <TextStyleRow shape={shape} onStyle={onStyle} onToggle={onToggle} preventBlur />
+              <div className="w-px h-6 bg-slate-200 mx-0.5" />
+            </>
+          )}
           <AlignRow shape={shape} onToggle={onToggle} preventBlur />
         </div>
         {shape.highlight && (
@@ -2491,13 +2579,12 @@ function Inspector({
     >
       <div className="flex justify-center">
         <div className="pointer-events-auto bg-white border shadow-lg rounded-2xl p-2 w-full max-w-md flex flex-col gap-2">
-          <div className="flex items-center gap-1">
-            <TextStyleRow shape={shape} onStyle={onStyle} onToggle={onChange} />
-            <div className="flex-1" />
-            <IconBtn icon="pencil" onClick={onEditText} ariaLabel="Edit text" />
-            <IconBtn icon="copy" onClick={onDuplicate} ariaLabel="Duplicate" title="Duplicate (Cmd/Ctrl+D)" />
-            <IconBtn icon="trash" onClick={onDelete} ariaLabel="Delete shape" variant="danger" />
-          </div>
+          {shape.kind === "text" && (
+            <div className="flex items-center gap-1">
+              <TextStyleRow shape={shape} onStyle={onStyle} onToggle={onChange} />
+              <div className="flex-1" />
+            </div>
+          )}
           <div className="flex items-center gap-1 flex-wrap">
             <ToggleBtn icon="bold" active={!!shape.bold} onActivate={() => onChange({ bold: !shape.bold })} ariaLabel="Bold" />
             <ToggleBtn icon="italic" active={!!shape.italic} onActivate={() => onChange({ italic: !shape.italic })} ariaLabel="Italic" />
@@ -2505,9 +2592,16 @@ function Inspector({
             <div className="w-px h-6 bg-slate-200 mx-0.5" />
             <AlignRow shape={shape} onToggle={onChange} />
             <div className="w-px h-6 bg-slate-200 mx-0.5" />
-            <IconBtn icon="a-arrow-down" onClick={() => onBump(-FONT_STEP)} ariaLabel="Smaller text" />
-            <div className="px-1 text-xs text-slate-500 tabular-nums w-8 text-center">{effFontSize(shape)}</div>
-            <IconBtn icon="a-arrow-up" onClick={() => onBump(FONT_STEP)} ariaLabel="Larger text" />
+            {/* Keep A- / size / A+ together as one wrap-unit */}
+            <div className="flex items-center gap-1">
+              <IconBtn icon="a-arrow-down" onClick={() => onBump(-FONT_STEP)} ariaLabel="Smaller text" />
+              <div className="px-1 text-xs text-slate-500 tabular-nums w-8 text-center">{effFontSize(shape)}</div>
+              <IconBtn icon="a-arrow-up" onClick={() => onBump(FONT_STEP)} ariaLabel="Larger text" />
+            </div>
+            <div className="flex-1" />
+            <IconBtn icon="pencil" onClick={onEditText} ariaLabel="Edit text" />
+            <IconBtn icon="copy" onClick={onDuplicate} ariaLabel="Duplicate" title="Duplicate (Cmd/Ctrl+D)" />
+            <IconBtn icon="trash" onClick={onDelete} ariaLabel="Delete shape" variant="danger" />
           </div>
           <div className="flex items-center gap-1.5 px-1">
             <span className="text-[10px] uppercase tracking-wide text-slate-400 w-8 shrink-0">Fill</span>

@@ -10,6 +10,9 @@ interface Preview {
   siteName?: string;
 }
 
+const UA =
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
 function decodeHtml(s: string): string {
   return s
     .replace(/&amp;/g, "&")
@@ -22,7 +25,6 @@ function decodeHtml(s: string): string {
 }
 
 function metaContent(html: string, name: string): string | undefined {
-  // <meta property="og:title" content="..."> or content="..." property="og:title">
   const a = new RegExp(`<meta[^>]+(?:property|name)=["']${name}["'][^>]*content=["']([^"']+)["']`, "i");
   const b = new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']${name}["']`, "i");
   const m = html.match(a) ?? html.match(b);
@@ -49,30 +51,13 @@ function isSafeHost(host: string): boolean {
   return true;
 }
 
-export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url);
-  const url = searchParams.get("url");
-  if (!url) return NextResponse.json({ error: "url required" }, { status: 400 });
-
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return NextResponse.json({ error: "invalid url" }, { status: 400 });
-  }
-  if (!["http:", "https:"].includes(parsed.protocol)) {
-    return NextResponse.json({ error: "invalid protocol" }, { status: 400 });
-  }
-  if (!isSafeHost(parsed.hostname)) {
-    return NextResponse.json({ error: "blocked host" }, { status: 400 });
-  }
-
+async function fetchHtml(url: string, ms = 7000): Promise<string | null> {
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 7000);
-    const r = await fetch(parsed.href, {
+    const timer = setTimeout(() => controller.abort(), ms);
+    const r = await fetch(url, {
       headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; MiroStyleBot/1.0; +https://miro-style)",
+        "User-Agent": UA,
         Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.5",
         "Accept-Language": "en-US,en;q=0.9",
       },
@@ -80,51 +65,142 @@ export async function GET(req: Request) {
       redirect: "follow",
     });
     clearTimeout(timer);
-    if (!r.ok) {
-      return NextResponse.json({ error: `upstream ${r.status}` }, { status: 502 });
-    }
-    const contentType = r.headers.get("content-type") || "";
-    if (!contentType.includes("html") && !contentType.includes("xml")) {
-      return NextResponse.json({ error: "not html" }, { status: 415 });
-    }
-    // Read up to ~100KB
+    if (!r.ok) return null;
+    const ct = r.headers.get("content-type") || "";
+    if (!ct.includes("html") && !ct.includes("xml")) return null;
     const reader = r.body?.getReader();
-    if (!reader) return NextResponse.json({ error: "empty body" }, { status: 502 });
+    if (!reader) return null;
     const decoder = new TextDecoder();
     let html = "";
     let bytes = 0;
-    while (bytes < 120_000) {
+    while (bytes < 150_000) {
       const { value, done } = await reader.read();
       if (done) break;
       bytes += value.byteLength;
       html += decoder.decode(value, { stream: true });
     }
     try { await reader.cancel(); } catch {}
-
-    const preview: Preview = {
-      title: firstMeta(html, ["og:title", "twitter:title"]),
-      image: firstMeta(html, ["og:image", "og:image:secure_url", "twitter:image", "twitter:image:src"]),
-      description: firstMeta(html, ["og:description", "twitter:description", "description"]),
-      siteName: firstMeta(html, ["og:site_name"]),
-    };
-    if (!preview.title) {
-      const tm = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-      if (tm) preview.title = decodeHtml(tm[1]).trim();
-    }
-    // Resolve relative image URLs against the final URL.
-    if (preview.image) {
-      try {
-        preview.image = new URL(preview.image, parsed.href).href;
-      } catch {}
-    }
-    return NextResponse.json({
-      title: preview.title?.slice(0, 220),
-      image: preview.image,
-      description: preview.description?.slice(0, 400),
-      siteName: preview.siteName?.slice(0, 80),
-    });
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : "fetch error";
-    return NextResponse.json({ error: msg }, { status: 502 });
+    return html;
+  } catch {
+    return null;
   }
+}
+
+async function fetchJson(url: string, ms = 7000): Promise<unknown | null> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ms);
+    const r = await fetch(url, {
+      headers: {
+        "User-Agent": UA,
+        Accept: "application/json",
+      },
+      signal: controller.signal,
+      redirect: "follow",
+    });
+    clearTimeout(timer);
+    if (!r.ok) return null;
+    return await r.json();
+  } catch {
+    return null;
+  }
+}
+
+function youTubeId(u: URL): string | null {
+  if (u.hostname === "youtu.be") return u.pathname.slice(1).split("/")[0] || null;
+  if (u.hostname.includes("youtube.com")) {
+    if (u.pathname === "/watch") return u.searchParams.get("v");
+    const m = u.pathname.match(/\/(?:shorts|embed|v|live)\/([^/?]+)/);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+function instagramShortcode(u: URL): { kind: string; id: string } | null {
+  // /p/<id>, /reel/<id>, /tv/<id>
+  const m = u.pathname.match(/\/(p|reel|tv)\/([^/]+)/);
+  if (!m) return null;
+  return { kind: m[1], id: m[2] };
+}
+
+function parsePreview(html: string, baseUrl: URL): Preview {
+  const preview: Preview = {
+    title: firstMeta(html, ["og:title", "twitter:title"]),
+    image: firstMeta(html, ["og:image", "og:image:secure_url", "twitter:image", "twitter:image:src"]),
+    description: firstMeta(html, ["og:description", "twitter:description", "description"]),
+    siteName: firstMeta(html, ["og:site_name"]),
+  };
+  if (!preview.title) {
+    const tm = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    if (tm) preview.title = decodeHtml(tm[1]).trim();
+  }
+  if (preview.image) {
+    try { preview.image = new URL(preview.image, baseUrl.href).href; } catch {}
+  }
+  return {
+    title: preview.title?.slice(0, 220),
+    image: preview.image,
+    description: preview.description?.slice(0, 400),
+    siteName: preview.siteName?.slice(0, 80),
+  };
+}
+
+export async function GET(req: Request) {
+  const { searchParams } = new URL(req.url);
+  const url = searchParams.get("url");
+  if (!url) return NextResponse.json({ error: "url required" }, { status: 400 });
+
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { return NextResponse.json({ error: "invalid url" }, { status: 400 }); }
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    return NextResponse.json({ error: "invalid protocol" }, { status: 400 });
+  }
+  if (!isSafeHost(parsed.hostname)) {
+    return NextResponse.json({ error: "blocked host" }, { status: 400 });
+  }
+
+  const host = parsed.hostname.toLowerCase();
+
+  // YouTube: oEmbed is the most reliable source for title + thumbnail.
+  if (host.includes("youtube.com") || host === "youtu.be") {
+    const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(parsed.href)}&format=json`;
+    const data = (await fetchJson(oembedUrl)) as { title?: string; thumbnail_url?: string; author_name?: string } | null;
+    if (data && (data.title || data.thumbnail_url)) {
+      const id = youTubeId(parsed);
+      return NextResponse.json({
+        title: data.title?.slice(0, 220) || "YouTube video",
+        image: data.thumbnail_url || (id ? `https://img.youtube.com/vi/${id}/hqdefault.jpg` : undefined),
+        description: data.author_name,
+        siteName: "YouTube",
+      });
+    }
+    // fall through to HTML parse
+  }
+
+  // Instagram: their public embed page exposes OG tags without auth.
+  if (host.includes("instagram.com")) {
+    const shortcode = instagramShortcode(parsed);
+    if (shortcode) {
+      const embedUrl = `https://www.instagram.com/${shortcode.kind}/${shortcode.id}/embed/`;
+      const html = await fetchHtml(embedUrl);
+      if (html) {
+        const p = parsePreview(html, new URL(embedUrl));
+        if (p.title || p.image) {
+          return NextResponse.json({
+            title: p.title || "Instagram post",
+            image: p.image,
+            description: p.description,
+            siteName: "Instagram",
+          });
+        }
+      }
+    }
+    // fall through to root page parse
+  }
+
+  const html = await fetchHtml(parsed.href);
+  if (!html) {
+    return NextResponse.json({ error: "fetch failed" }, { status: 502 });
+  }
+  return NextResponse.json(parsePreview(html, parsed));
 }
