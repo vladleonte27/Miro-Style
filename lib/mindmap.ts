@@ -1,7 +1,7 @@
 import type { Edge, Shape, ShapeKind, TextAlign } from "./types";
 import { newId } from "./id";
 
-export type MindmapStyle = "h1" | "h2" | "h3" | "body" | "bullet";
+export type MindmapStyle = "h1" | "h2" | "h3" | "body" | "bullet" | "asset";
 export type SectionLayout = "tree" | "compare" | "row";
 
 export interface MindmapNode {
@@ -21,7 +21,7 @@ export interface MindmapDocument {
   sections: MindmapSection[];
 }
 
-const VALID_STYLES: MindmapStyle[] = ["h1", "h2", "h3", "body", "bullet"];
+const VALID_STYLES: MindmapStyle[] = ["h1", "h2", "h3", "body", "bullet", "asset"];
 const VALID_LAYOUTS: SectionLayout[] = ["tree", "compare", "row"];
 const VALID_ALIGNS: TextAlign[] = ["left", "center", "right"];
 
@@ -40,6 +40,7 @@ const TITLE_HEIGHT = 56;   // section-title shape height + breathing room
 interface Preset {
   fontSize: number;
   bold: boolean;
+  italic: boolean;
   bullet: boolean;
   w: number;
   h: number;
@@ -48,12 +49,13 @@ interface Preset {
 function presetFor(style: MindmapStyle | undefined, depth: number): Preset {
   const s: MindmapStyle = style ?? (depth === 0 ? "h1" : depth === 1 ? "h2" : "body");
   switch (s) {
-    case "h1": return { fontSize: 24, bold: true, bullet: false, w: 280, h: 96 };
-    case "h2": return { fontSize: 18, bold: true, bullet: false, w: 220, h: 76 };
-    case "h3": return { fontSize: 16, bold: true, bullet: false, w: 200, h: 64 };
-    case "bullet": return { fontSize: 14, bold: false, bullet: true, w: 240, h: 52 };
+    case "h1": return { fontSize: 24, bold: true, italic: false, bullet: false, w: 280, h: 96 };
+    case "h2": return { fontSize: 18, bold: true, italic: false, bullet: false, w: 220, h: 76 };
+    case "h3": return { fontSize: 16, bold: true, italic: false, bullet: false, w: 200, h: 64 };
+    case "bullet": return { fontSize: 14, bold: false, italic: false, bullet: true, w: 240, h: 52 };
+    case "asset": return { fontSize: 13, bold: false, italic: true, bullet: false, w: 280, h: 140 };
     case "body":
-    default: return { fontSize: 14, bold: false, bullet: false, w: 200, h: 60 };
+    default: return { fontSize: 14, bold: false, italic: false, bullet: false, w: 200, h: 60 };
   }
 }
 
@@ -105,10 +107,16 @@ function layoutTree(node: MindmapNode, originX: number, originY: number, branchC
 
     let kind: ShapeKind;
     if (depth === 0 && !branch) kind = "ellipse";
+    else if (node.style === "asset") kind = "diamond";
     else if (preset.bullet) kind = "text";
     else kind = "rect";
 
-    const myColor = depth === 0 && !branch ? "#ffffff" : branch ?? BRANCH_THEMES[0];
+    const myColor =
+      depth === 0 && !branch
+        ? "#ffffff"
+        : node.style === "asset"
+          ? "#e2e8f0" // light slate — flags "drop your visual here"
+          : branch ?? BRANCH_THEMES[0];
 
     shapes.push({
       id, kind,
@@ -118,9 +126,17 @@ function layoutTree(node: MindmapNode, originX: number, originY: number, branchC
       h: preset.h,
       text: node.label,
       fill: kind === "text" ? "transparent" : myColor,
-      stroke: kind === "text" ? "transparent" : depth === 0 && !branch ? "#0f172a" : "#1f2937",
+      stroke:
+        kind === "text"
+          ? "transparent"
+          : node.style === "asset"
+            ? "#64748b" // slate-500 stroke for asset diamonds
+            : depth === 0 && !branch
+              ? "#0f172a"
+              : "#1f2937",
       fontSize: preset.fontSize,
       bold: preset.bold || undefined,
+      italic: preset.italic || undefined,
       bullet: preset.bullet || undefined,
       textAlign: align,
     });

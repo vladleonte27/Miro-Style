@@ -57,12 +57,16 @@ The import accepts **either** of two shapes. Pick whichever fits the request.
 
 ```ts
 type Node = {
-  label: string;                                       // required, non-empty
-  style?: "h1" | "h2" | "h3" | "body" | "bullet";      // optional preset
-  align?: "left" | "center" | "right";                 // optional alignment
-  children?: Node[];                                   // optional sub-nodes
+  label: string;                                                     // required, non-empty
+  style?: "h1" | "h2" | "h3" | "body" | "bullet" | "asset";          // optional preset
+  align?: "left" | "center" | "right";                               // optional alignment
+  children?: Node[];                                                 // optional sub-nodes
 };
 ```
+
+Style `"asset"` is special: it renders as a **diamond** with italic text and a
+light-slate fill — an explicit placeholder for an image, clip, chart, screen
+recording, or quote card. See **§5.5 Visual asset planning**.
 
 Use this when the whole topic is one connected hierarchy — every node hangs off the root.
 
@@ -168,14 +172,14 @@ If the prompt is ambiguous about type, default to a **planning** structure with 
 
 Branches are exactly these five, in this order, each `style: "h2"`. No sixth branch.
 
-1. **Hook** — 1-2 `bullet` leaves. Each is a one-line cold open. The hook states the *tension*, not the answer. Never "Hi I'm…" or "In this video I'll…". Pattern interrupt first, payoff later.
-2. **Setup** — 2-3 leaves answering *what they'll learn, why now, who it's for*. These are the **sub-promises** the viewer collects throughout the video. Spread them so they pay off later.
-3. **Body** — 3-5 children, each an `h3` named for the section. Inside each `h3`, exactly three leaves in this order:
+1. **Hook** — 1-2 `bullet` leaves (each a one-line cold open) **plus 1 `asset` leaf** for the cold-open visual. The hook states the *tension*, not the answer. Never "Hi I'm…" or "In this video I'll…". Pattern interrupt first, payoff later.
+2. **Setup** — 2-3 `body` leaves answering *what they'll learn, why now, who it's for*, **plus 1 `asset` leaf** showing what the viewer is about to see (a chart, a result, a before-state). Sub-promises here pay off later in Body.
+3. **Body** — 3-5 children, each an `h3` named for the section. Inside each `h3`, exactly **three leaves** in this order:
    1. A `body` leaf stating the **main point** of the section (one sentence).
-   2. 1-2 `bullet` leaves with **B-roll / example cues** — concrete and visual ("show the spreadsheet", "cut to phone screen", "graph zoom-in").
+   2. One `asset` leaf with a *specific* visual cue (see §5.5 taxonomy).
    3. One `bullet` leaf starting with **"Open loop:"** that teases the next section.
-4. **Payoff** — 2-3 `body` leaves: the reveal that resolves the biggest open loop, the reason it works, and the so-what for the viewer.
-5. **CTA** — 1-2 `bullet` leaves. Subscribe / watch-next / comment prompt. Always last; never mid-video.
+4. **Payoff** — 2-3 `body` leaves resolving the biggest open loop, **plus 1 `asset` leaf** that visually clinches the moment (usually a chart, a quote card, or a transformation shot).
+5. **CTA** — 1-2 `bullet` leaves. Subscribe / watch-next / comment prompt. Always last; never mid-video. Usually no asset.
 
 **Retention rules baked into the labels:**
 - Hook never gives the answer; it sets up a tension.
@@ -210,6 +214,77 @@ A long script almost never fits cleanly into a single tree. Reach for the sectio
 - Steps / takeaways beat → `"row"` for a row of independent things the viewer should remember.
 
 Don't force every beat into one tree just because it's the default. If two ideas in your script aren't actually causally connected, they shouldn't be in the same tree.
+
+## 5.5 Visual asset planning (assets are diamonds)
+
+A great script is paced by visual changes as much as by what's said. A board of all-rectangles reads as one long talking-head — flat retention. The schema includes `style: "asset"` to plant **explicit visual placeholders** the user fills in later. Asset nodes render as **diamonds** with italic text and a light-slate fill — so when the user scans the imported board, they can see at a glance exactly *where* every image, clip, chart, or screen needs to go.
+
+This is one of the highest-leverage things this skill does. **Plan visuals as part of the script, not as an afterthought.**
+
+### Density — how many assets to plant
+
+Rough rule: **one new visual every ~7–10 seconds of script**. For a 60–90s video that's typically 8–12 asset placeholders. Translate per template slot:
+
+- Hook (§5 YT template) → **1 asset minimum** (the cold-open visual)
+- Setup → 1 asset showing what the viewer's about to see
+- Body — every `h3` sub-section → 1 asset
+- Payoff → 1 asset (chart, quote card, transformation shot)
+- CTA → usually no asset
+- **Compare** sections → **parallel assets on BOTH sides** (if one side has a chart, the other must too)
+- Tree sections covering a mechanism → 1 asset per `h3` sub-pillar
+- Row sections → 1 asset per row item if the row is the "moment of action"
+
+Don't tag every leaf as `asset` — density should be *enough to keep retention*, not maximum.
+
+### Asset taxonomy — prefix conventions
+
+Lead every asset label with an emoji prefix that names the asset type, then a colon, then a *specific* description. Use these:
+
+| Prefix | What it is | Use for |
+|--------|------------|---------|
+| `📷 Photo` | Real photograph | People, places, products |
+| `🎬 B-roll` | Short video clip (≤ 3s) | Action, atmosphere, context |
+| `📊 Chart` | Data graphic | Numbers, trends, comparisons |
+| `📱 Screen` | Screen recording or screenshot | App demos, tutorials, UI |
+| `💬 Quote` | Text quote card on screen | Testimonial, authority, single line |
+| `📰 Headline` | News-style title card | A big claim, a framing |
+| `📈 Before/After` | Two-image comparison | Transformation arc |
+| `🧠 Diagram` | Illustrated concept | Mental model, system, flow |
+| `🎙️ Clip` | Audio cut / podcast quote with waveform | Authority, real-life proof |
+| `✏️ Text` | On-screen kinetic text | Punchline, emphasis, statistic |
+
+### Specificity — be concrete enough to source
+
+The user will go shoot / find / generate the actual asset from your label. The label must be specific enough that someone could find a real one:
+
+- **Subject** ("founder"), **action** ("closing laptop"), **context** ("late at night"). Write at least 2 of those 3.
+- **Charts**: name the *metric*, the *time range*, and *which line wins*.
+- **Screens**: name the app, the screen, and what's visible.
+- **Quotes**: include the actual line.
+
+Examples — bad → good:
+
+| ❌ Mediocre | ✅ Excellent |
+|---|---|
+| `Image of coach` | `📷 Photo: Coach A leaning back, half-empty calendar visible on monitor` |
+| `Chart` | `📊 Chart: MRR line — Coach A climbing, Coach B flat, Jan–Aug` |
+| `B-roll of computer` | `🎬 B-roll: hand typing new price in Stripe dashboard, hits Save` |
+| `Show the app` | `📱 Screen: Stripe → Products → click price → type 49 → save` |
+| `Quote` | `💬 Quote card: "Discomfort is the cost of growth." — Naval` |
+
+### Where to plant assets in the tree
+
+- Assets are **leaves**, not branches. They hang off the beat they illustrate.
+- Don't create an "Assets" or "Visuals" branch. That's bookkeeping, not script.
+- Don't make an asset have children. If a visual needs context, that context goes in the parent `body`/`bullet` next to it.
+
+### Anti-patterns
+
+- ❌ Generic asset labels: `B-roll`, `Image`, `Photo of person`, `Chart`. Missing the description.
+- ❌ Every leaf as `asset`. One per Body sub-section is the bar; more is noise.
+- ❌ Asymmetric compare: only one side has visuals. Both sides must mirror each other in asset density.
+- ❌ Asset as a structural container with children.
+- ❌ Asset for the CTA. CTA is text + voiceover; visuals there steal attention from the action.
 
 ## 6. Quality rules
 
