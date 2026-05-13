@@ -27,6 +27,11 @@ body {
   touch-action: none;
   user-select: none;
   -webkit-user-select: none;
+  cursor: grab;
+}
+
+.canvas-surface:active {
+  cursor: grabbing;
 }
 
 /* hide scrollbars in toolbar overflow areas */

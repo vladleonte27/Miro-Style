@@ -13,11 +13,13 @@ import type { Anchor, Board, Edge, Shape, ShapeKind } from "@/lib/types";
 import { newId } from "@/lib/id";
 import { layoutMindmap, type MindmapNode } from "@/lib/mindmap";
 import ImportDialog from "./ImportDialog";
+import { Icon, type IconName } from "./icons";
 
 type Mode = "select" | "connect";
 type Corner = "nw" | "ne" | "sw" | "se";
 type Pt = { x: number; y: number };
 type Viewport = { tx: number; ty: number; scale: number };
+type Snapshot = { shapes: Shape[]; edges: Edge[] };
 
 type Drag =
   | { kind: "none" }
@@ -42,23 +44,18 @@ const FONT_MAX = 72;
 const FONT_STEP = 2;
 const SNAP_PX = 6;
 const HISTORY_LIMIT = 50;
+const EDGE_HIT_WIDTH = 18;
 
 // ---------- pure helpers ----------
 
 function clamp(v: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, v));
 }
-function shapeCenter(s: Shape): Pt {
-  return { x: s.x + s.w / 2, y: s.y + s.h / 2 };
-}
 function effFontSize(s: Shape): number {
   return s.fontSize ?? (s.kind === "text" ? 18 : 14);
 }
 function effHighlightColor(s: Shape): string {
   return s.highlightColor ?? DEFAULT_HIGHLIGHT;
-}
-function effFill(s: Shape): string {
-  return s.highlight ? effHighlightColor(s) : s.fill;
 }
 function clipPathFor(kind: ShapeKind): string | undefined {
   if (kind === "ellipse") return "ellipse(50% 50% at 50% 50%)";
@@ -103,25 +100,30 @@ function closestAnchor(s: Shape, x: number, y: number): Anchor {
   }
   return best;
 }
-function edgePath(p1: Pt, p2: Pt, a1: Anchor, a2: Anchor): string {
+function edgePath(p1: Pt, p2: Pt, a1: Anchor, a2: Anchor): { d: string; mid: Pt } {
   const dx = p2.x - p1.x;
   const dy = p2.y - p1.y;
   const dist = clamp(Math.hypot(dx, dy) * 0.45, 40, 240);
   const c1 = controlOffset(a1, dist);
   const c2 = controlOffset(a2, dist);
-  return `M ${p1.x} ${p1.y} C ${p1.x + c1.x} ${p1.y + c1.y}, ${p2.x + c2.x} ${p2.y + c2.y}, ${p2.x} ${p2.y}`;
+  const mid: Pt = {
+    x: 0.5 * p1.x + 0.5 * p2.x + 0.375 * (c1.x + c2.x),
+    y: 0.5 * p1.y + 0.5 * p2.y + 0.375 * (c1.y + c2.y),
+  };
+  return {
+    d: `M ${p1.x} ${p1.y} C ${p1.x + c1.x} ${p1.y + c1.y}, ${p2.x + c2.x} ${p2.y + c2.y}, ${p2.x} ${p2.y}`,
+    mid,
+  };
 }
 function loosePath(p1: Pt, a1: Anchor, to: Pt): string {
   const dx = to.x - p1.x;
   const dy = to.y - p1.y;
   const dist = clamp(Math.hypot(dx, dy) * 0.5, 30, 220);
   const c1 = controlOffset(a1, dist);
-  // mirror direction at the loose end so the curve is smooth
   const c2 = { x: -dx * 0.3, y: -dy * 0.3 };
   return `M ${p1.x} ${p1.y} C ${p1.x + c1.x} ${p1.y + c1.y}, ${to.x + c2.x} ${to.y + c2.y}, ${to.x} ${to.y}`;
 }
 
-// snap math: returns delta to apply + which positions matched
 function computeSnap(
   x: number,
   y: number,
@@ -169,6 +171,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
   const [shapes, setShapes] = useState<Shape[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>("select");
   const [edgeFromId, setEdgeFromId] = useState<string | null>(null);
@@ -194,16 +197,15 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
   const shapesRef = useRef<Shape[]>([]);
   const edgesRef = useRef<Edge[]>([]);
   const viewportRef = useRef(viewport);
-  const connectPreviewRef = useRef<typeof connectPreview>(null);
-  const historyRef = useRef<{ shapes: Shape[]; edges: Edge[] }[]>([]);
-  const futureRef = useRef<{ shapes: Shape[]; edges: Edge[] }[]>([]);
+  const historyRef = useRef<Snapshot[]>([]);
+  const futureRef = useRef<Snapshot[]>([]);
+  const preDragRef = useRef<Snapshot | null>(null);
   const rafRef = useRef<number | null>(null);
   const pendingMoveRef = useRef<PointerEvent | null>(null);
 
   useEffect(() => { shapesRef.current = shapes; }, [shapes]);
   useEffect(() => { edgesRef.current = edges; }, [edges]);
   useEffect(() => { viewportRef.current = viewport; }, [viewport]);
-  useEffect(() => { connectPreviewRef.current = connectPreview; }, [connectPreview]);
 
   // Load board
   useEffect(() => {
@@ -218,6 +220,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     setName(b.name);
     historyRef.current = [];
     futureRef.current = [];
+    setHistoryVersion((v) => v + 1);
   }, [boardId]);
 
   // Auto-save
@@ -229,38 +232,51 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     return () => clearTimeout(t);
   }, [board, name, shapes, edges]);
 
-  const pushHistory = useCallback(() => {
-    historyRef.current.push({ shapes: shapesRef.current, edges: edgesRef.current });
+  const snapshot = useCallback(
+    (): Snapshot => ({ shapes: shapesRef.current, edges: edgesRef.current }),
+    [],
+  );
+
+  const pushHistory = useCallback((snap: Snapshot) => {
+    // Skip if state is identical (no-op action).
+    if (snap.shapes === shapesRef.current && snap.edges === edgesRef.current) return;
+    historyRef.current.push(snap);
     if (historyRef.current.length > HISTORY_LIMIT) historyRef.current.shift();
     futureRef.current = [];
     setHistoryVersion((v) => v + 1);
   }, []);
 
   const undo = useCallback(() => {
-    const prev = historyRef.current.pop();
+    // Skip no-op history entries.
+    let prev: Snapshot | undefined;
+    while ((prev = historyRef.current.pop())) {
+      if (prev.shapes !== shapesRef.current || prev.edges !== edgesRef.current) break;
+    }
     if (!prev) return;
-    futureRef.current.unshift({ shapes: shapesRef.current, edges: edgesRef.current });
+    futureRef.current.unshift(snapshot());
     if (futureRef.current.length > HISTORY_LIMIT) futureRef.current.pop();
     setShapes(prev.shapes);
     setEdges(prev.edges);
     setSelectedId(null);
+    setSelectedEdgeId(null);
     setEditingId(null);
     setHistoryVersion((v) => v + 1);
-  }, []);
+  }, [snapshot]);
 
   const redo = useCallback(() => {
     const next = futureRef.current.shift();
     if (!next) return;
-    historyRef.current.push({ shapes: shapesRef.current, edges: edgesRef.current });
+    historyRef.current.push(snapshot());
     if (historyRef.current.length > HISTORY_LIMIT) historyRef.current.shift();
     setShapes(next.shapes);
     setEdges(next.edges);
     setSelectedId(null);
+    setSelectedEdgeId(null);
     setEditingId(null);
     setHistoryVersion((v) => v + 1);
-  }, []);
+  }, [snapshot]);
 
-  // Wheel zoom (desktop)
+  // Wheel zoom
   useEffect(() => {
     const svg = svgRef.current;
     if (!svg) return;
@@ -281,7 +297,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     return () => svg.removeEventListener("wheel", onWheel);
   }, []);
 
-  // Pointer move/up handlers with rAF coalescing
+  // Pointer handlers (rAF coalesced)
   useEffect(() => {
     function handleMove(e: PointerEvent) {
       const d = dragRef.current;
@@ -380,10 +396,16 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       });
     }
 
+    function commitPreDrag() {
+      const pre = preDragRef.current;
+      preDragRef.current = null;
+      if (!pre) return;
+      pushHistory(pre);
+    }
+
     function onEnd(e: PointerEvent) {
       const d = dragRef.current;
       if (d.kind === "connecting") {
-        // Decide target from the raw release position, not from stale state.
         const svg = svgRef.current;
         let targetId: string | null = null;
         let toAnchor: Anchor | null = null;
@@ -419,11 +441,13 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
         setConnectPreview(null);
         dragRef.current = { kind: "none" };
         pointersRef.current.delete(e.pointerId);
+        commitPreDrag();
         return;
       }
       pointersRef.current.delete(e.pointerId);
-      if (d.kind === "move") {
+      if (d.kind === "move" || d.kind === "resize") {
         setSnapGuides({ x: null, y: null });
+        commitPreDrag();
       }
       if (d.kind === "pinch" && pointersRef.current.size < 2) {
         dragRef.current = { kind: "none" };
@@ -441,62 +465,75 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       window.removeEventListener("pointercancel", onEnd);
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
     };
-  }, []);
+  }, [pushHistory]);
 
   const deleteShape = useCallback((id: string) => {
-    pushHistory();
+    pushHistory(snapshot());
     setShapes((s) => s.filter((x) => x.id !== id));
     setEdges((es) => es.filter((x) => x.from !== id && x.to !== id));
     setSelectedId((sel) => (sel === id ? null : sel));
     setEditingId((ed) => (ed === id ? null : ed));
-  }, [pushHistory]);
+  }, [pushHistory, snapshot]);
+
+  const deleteEdge = useCallback((id: string) => {
+    pushHistory(snapshot());
+    setEdges((es) => es.filter((e) => e.id !== id));
+    setSelectedEdgeId((sel) => (sel === id ? null : sel));
+  }, [pushHistory, snapshot]);
 
   const duplicateShape = useCallback((id: string) => {
     const src = shapesRef.current.find((s) => s.id === id);
     if (!src) return;
-    pushHistory();
+    pushHistory(snapshot());
     const copy: Shape = { ...src, id: newId("s_"), x: src.x + 24, y: src.y + 24 };
     setShapes((ss) => [...ss, copy]);
     setSelectedId(copy.id);
-  }, [pushHistory]);
+  }, [pushHistory, snapshot]);
 
   // Keyboard
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       const tag = (e.target as HTMLElement | null)?.tagName;
+      const isEditable = (e.target as HTMLElement | null)?.isContentEditable;
       const cmd = e.metaKey || e.ctrlKey;
       if (cmd && e.key.toLowerCase() === "z") {
-        if (tag === "INPUT" || tag === "TEXTAREA") return;
+        if (tag === "INPUT" || tag === "TEXTAREA" || isEditable) return;
         e.preventDefault();
         if (e.shiftKey) redo(); else undo();
         return;
       }
       if (cmd && e.key.toLowerCase() === "y") {
-        if (tag === "INPUT" || tag === "TEXTAREA") return;
+        if (tag === "INPUT" || tag === "TEXTAREA" || isEditable) return;
         e.preventDefault();
         redo();
         return;
       }
       if (cmd && e.key.toLowerCase() === "d" && selectedId) {
-        if (tag === "INPUT" || tag === "TEXTAREA") return;
+        if (tag === "INPUT" || tag === "TEXTAREA" || isEditable) return;
         e.preventDefault();
         duplicateShape(selectedId);
         return;
       }
       if (editingId) return;
-      if (tag === "INPUT" || tag === "TEXTAREA") return;
-      if ((e.key === "Delete" || e.key === "Backspace") && selectedId) {
-        e.preventDefault();
-        deleteShape(selectedId);
+      if (tag === "INPUT" || tag === "TEXTAREA" || isEditable) return;
+      if (e.key === "Delete" || e.key === "Backspace") {
+        if (selectedId) {
+          e.preventDefault();
+          deleteShape(selectedId);
+        } else if (selectedEdgeId) {
+          e.preventDefault();
+          deleteEdge(selectedEdgeId);
+        }
       } else if (e.key === "Escape") {
         setMode("select");
         setEdgeFromId(null);
         setSelectedId(null);
+        setSelectedEdgeId(null);
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selectedId, editingId, undo, redo, deleteShape, duplicateShape]);
+  }, [selectedId, selectedEdgeId, editingId, undo, redo, deleteShape, deleteEdge, duplicateShape]);
 
   function trySwitchToPinch(): boolean {
     if (pointersRef.current.size < 2) return false;
@@ -516,11 +553,12 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     };
     setConnectPreview(null);
     setSnapGuides({ x: null, y: null });
+    preDragRef.current = null;
     return true;
   }
 
   function addShape(kind: ShapeKind) {
-    pushHistory();
+    pushHistory(snapshot());
     const rect = svgRef.current!.getBoundingClientRect();
     const cx = (rect.width / 2 - viewport.tx) / viewport.scale;
     const cy = (rect.height / 2 - viewport.ty) / viewport.scale;
@@ -539,6 +577,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     };
     setShapes((ss) => [...ss, s]);
     setSelectedId(s.id);
+    setSelectedEdgeId(null);
     setAddOpen(false);
   }
 
@@ -556,7 +595,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
         if (fromShape) {
           const [fa, ta] = bestAnchorPair(fromShape, s);
           const fromId = edgeFromId;
-          pushHistory();
+          pushHistory(snapshot());
           setEdges((es) =>
             es.some((x) => x.from === fromId && x.to === s.id)
               ? es
@@ -569,8 +608,9 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       return;
     }
     setSelectedId(s.id);
+    setSelectedEdgeId(null);
     const rect = svgRef.current!.getBoundingClientRect();
-    pushHistory();
+    preDragRef.current = snapshot();
     dragRef.current = {
       kind: "move",
       id: s.id,
@@ -584,13 +624,14 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       moved: false,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editingId, mode, edgeFromId, pushHistory]);
+  }, [editingId, mode, edgeFromId, pushHistory, snapshot]);
 
   const onShapeDoubleClick = useCallback((id: string) => {
-    pushHistory();
+    pushHistory(snapshot());
     setEditingId(id);
     setSelectedId(id);
-  }, [pushHistory]);
+    setSelectedEdgeId(null);
+  }, [pushHistory, snapshot]);
 
   function onCanvasPointerDown(e: React.PointerEvent) {
     if (editingId) setEditingId(null);
@@ -598,6 +639,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     if (trySwitchToPinch()) return;
 
     setSelectedId(null);
+    setSelectedEdgeId(null);
     setAddOpen(false);
     setMenuOpen(false);
     if (mode === "connect") {
@@ -619,7 +661,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     e.stopPropagation();
     pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (trySwitchToPinch()) return;
-    pushHistory();
+    preDragRef.current = snapshot();
     const rect = svgRef.current!.getBoundingClientRect();
     dragRef.current = {
       kind: "resize",
@@ -636,6 +678,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     e.stopPropagation();
     pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (trySwitchToPinch()) return;
+    preDragRef.current = snapshot();
     dragRef.current = { kind: "connecting", fromId: s.id, fromAnchor: anchor };
     const start = anchorPoint(s, anchor);
     setConnectPreview({
@@ -648,13 +691,20 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     });
   }
 
-  const updateShape = useCallback((id: string, patch: Partial<Shape>, opts?: { history?: boolean }) => {
-    if (opts?.history !== false) pushHistory();
-    setShapes((ss) => ss.map((s) => (s.id === id ? { ...s, ...patch } : s)));
-  }, [pushHistory]);
+  function onEdgePointerDown(e: React.PointerEvent, edgeId: string) {
+    e.stopPropagation();
+    if (editingId) setEditingId(null);
+    setSelectedId(null);
+    setSelectedEdgeId(edgeId);
+  }
 
-  function bumpFontSize(id: string, delta: number) {
-    pushHistory();
+  const updateShape = useCallback((id: string, patch: Partial<Shape>, opts?: { history?: boolean }) => {
+    if (opts?.history !== false) pushHistory(snapshot());
+    setShapes((ss) => ss.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+  }, [pushHistory, snapshot]);
+
+  function bumpFontSize(id: string, delta: number, opts?: { history?: boolean }) {
+    if (opts?.history !== false) pushHistory(snapshot());
     setShapes((ss) =>
       ss.map((s) => (s.id === id ? { ...s, fontSize: clamp(effFontSize(s) + delta, FONT_MIN, FONT_MAX) } : s)),
     );
@@ -678,11 +728,10 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
   }
 
   function applyMindmap(root: MindmapNode) {
-    pushHistory();
+    pushHistory(snapshot());
     const { shapes: ms, edges: me } = layoutMindmap(root);
     setShapes((ss) => [...ss, ...ms]);
     setEdges((es) => [...es, ...me]);
-    // After commit, fit to the imported set.
     requestAnimationFrame(() => autoFitTo(ms));
   }
 
@@ -694,20 +743,27 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     }
   }
 
-  // Pre-compute edge paths for stable rendering
+  // Build a lookup map so edge rendering is O(edges) not O(edges*shapes).
+  const shapesById = useMemo(() => {
+    const m = new Map<string, Shape>();
+    for (const s of shapes) m.set(s.id, s);
+    return m;
+  }, [shapes]);
+
   const renderedEdges = useMemo(() => {
     return edges.map((e) => {
-      const a = shapes.find((s) => s.id === e.from);
-      const b = shapes.find((s) => s.id === e.to);
+      const a = shapesById.get(e.from);
+      const b = shapesById.get(e.to);
       if (!a || !b) return null;
       const [fa, ta] = (e.fromAnchor && e.toAnchor)
         ? [e.fromAnchor, e.toAnchor]
         : bestAnchorPair(a, b);
       const p1 = anchorPoint(a, fa);
       const p2 = anchorPoint(b, ta);
-      return { id: e.id, d: edgePath(p1, p2, fa, ta) };
+      const { d, mid } = edgePath(p1, p2, fa, ta);
+      return { id: e.id, d, mid };
     });
-  }, [edges, shapes]);
+  }, [edges, shapesById]);
 
   if (board === undefined) return <div className="p-8 text-slate-500">Loading…</div>;
   if (board === null) {
@@ -719,11 +775,16 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     );
   }
 
-  const selected = shapes.find((s) => s.id === selectedId) ?? null;
-  const editing = shapes.find((s) => s.id === editingId) ?? null;
-  const connectingFrom = connectPreview ? shapes.find((s) => s.id === connectPreview.fromId) ?? null : null;
+  const selected = selectedId ? shapesById.get(selectedId) ?? null : null;
+  const editing = editingId ? shapesById.get(editingId) ?? null : null;
+  const selectedEdgeMid =
+    selectedEdgeId && !editing
+      ? renderedEdges.find((e) => e && e.id === selectedEdgeId)?.mid ?? null
+      : null;
+  const connectingFrom = connectPreview ? shapesById.get(connectPreview.fromId) ?? null : null;
   const canUndo = historyRef.current.length > 0;
   const canRedo = futureRef.current.length > 0;
+  const isEmpty = shapes.length === 0;
 
   return (
     <div className="flex flex-col" style={{ height: "100dvh" }}>
@@ -733,10 +794,10 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       >
         <Link
           href="/"
-          className="px-3 py-2 text-slate-600 hover:bg-slate-100 rounded-lg text-lg leading-none"
+          className="p-2 text-slate-600 hover:bg-slate-100 rounded-lg"
           aria-label="Back to boards"
         >
-          ←
+          <Icon name="arrow-left" size={20} />
         </Link>
         <input
           value={name}
@@ -747,17 +808,18 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
         <div className="relative">
           <button
             onClick={() => setMenuOpen((v) => !v)}
-            className="px-3 py-2 text-slate-600 hover:bg-slate-100 rounded-lg text-xl leading-none"
+            className="p-2 text-slate-600 hover:bg-slate-100 rounded-lg"
             aria-label="Board menu"
           >
-            ⋮
+            <Icon name="more-vertical" size={20} />
           </button>
           {menuOpen && (
             <div className="absolute right-0 top-full mt-1 bg-white border shadow-lg rounded-lg py-1 w-44 z-30">
               <button
                 onClick={() => { setMenuOpen(false); onDeleteBoard(); }}
-                className="block w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50"
+                className="flex items-center gap-2 w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50"
               >
+                <Icon name="trash" size={16} />
                 Delete board
               </button>
             </div>
@@ -785,6 +847,18 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
               <path d="M0,0 L10,5 L0,10 Z" fill="#475569" />
             </marker>
             <marker
+              id="edge-arrow-selected"
+              viewBox="0 0 10 10"
+              refX="9"
+              refY="5"
+              markerWidth={6}
+              markerHeight={6}
+              orient="auto"
+              markerUnits="strokeWidth"
+            >
+              <path d="M0,0 L10,5 L0,10 Z" fill="#0ea5e9" />
+            </marker>
+            <marker
               id="edge-arrow-preview"
               viewBox="0 0 10 10"
               refX="9"
@@ -799,47 +873,50 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
           </defs>
 
           <g transform={`translate(${viewport.tx} ${viewport.ty}) scale(${viewport.scale})`}>
-            {renderedEdges.map((e) =>
-              e ? (
-                <path
-                  key={e.id}
-                  d={e.d}
-                  stroke="#475569"
-                  strokeWidth={2}
-                  fill="none"
-                  vectorEffect="non-scaling-stroke"
-                  markerEnd="url(#edge-arrow)"
-                />
-              ) : null,
-            )}
+            {/* Edges */}
+            {renderedEdges.map((e) => {
+              if (!e) return null;
+              const isSel = e.id === selectedEdgeId;
+              return (
+                <g key={e.id}>
+                  {/* Wide invisible hit area */}
+                  <path
+                    d={e.d}
+                    stroke="transparent"
+                    strokeWidth={EDGE_HIT_WIDTH}
+                    fill="none"
+                    style={{ cursor: "pointer", touchAction: "none" }}
+                    onPointerDown={(ev) => onEdgePointerDown(ev, e.id)}
+                  />
+                  {/* Visible stroke */}
+                  <path
+                    d={e.d}
+                    stroke={isSel ? "#0ea5e9" : "#475569"}
+                    strokeWidth={isSel ? 2.5 : 2}
+                    fill="none"
+                    vectorEffect="non-scaling-stroke"
+                    markerEnd={isSel ? "url(#edge-arrow-selected)" : "url(#edge-arrow)"}
+                    pointerEvents="none"
+                  />
+                </g>
+              );
+            })}
 
-            {/* Snap guides */}
             {snapGuides.x !== null && (
               <line
-                x1={snapGuides.x}
-                y1={-1e6}
-                x2={snapGuides.x}
-                y2={1e6}
-                stroke="#f43f5e"
-                strokeWidth={1}
-                vectorEffect="non-scaling-stroke"
-                pointerEvents="none"
+                x1={snapGuides.x} y1={-1e6} x2={snapGuides.x} y2={1e6}
+                stroke="#f43f5e" strokeWidth={1}
+                vectorEffect="non-scaling-stroke" pointerEvents="none"
               />
             )}
             {snapGuides.y !== null && (
               <line
-                x1={-1e6}
-                y1={snapGuides.y}
-                x2={1e6}
-                y2={snapGuides.y}
-                stroke="#f43f5e"
-                strokeWidth={1}
-                vectorEffect="non-scaling-stroke"
-                pointerEvents="none"
+                x1={-1e6} y1={snapGuides.y} x2={1e6} y2={snapGuides.y}
+                stroke="#f43f5e" strokeWidth={1}
+                vectorEffect="non-scaling-stroke" pointerEvents="none"
               />
             )}
 
-            {/* Connect preview */}
             {connectPreview && connectingFrom && (
               <path
                 d={
@@ -849,7 +926,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
                         { x: connectPreview.toX, y: connectPreview.toY },
                         connectPreview.fromAnchor,
                         connectPreview.toAnchor,
-                      )
+                      ).d
                     : loosePath(
                         anchorPoint(connectingFrom, connectPreview.fromAnchor),
                         connectPreview.fromAnchor,
@@ -895,10 +972,9 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
               </>
             )}
 
-            {/* Highlight the live target's incoming anchor */}
             {connectPreview?.targetId && connectPreview.toAnchor && connectPreview.targetId !== selected?.id && (
               (() => {
-                const tgt = shapes.find((s) => s.id === connectPreview.targetId);
+                const tgt = shapesById.get(connectPreview.targetId);
                 if (!tgt) return null;
                 const p = anchorPoint(tgt, connectPreview.toAnchor);
                 return (
@@ -913,6 +989,19 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
           </g>
         </svg>
 
+        {/* Empty state */}
+        {isEmpty && !connectPreview && (
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+            <div className="text-center text-slate-400 max-w-xs px-6">
+              <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-slate-100 mb-3 text-slate-400">
+                <Icon name="plus" size={24} />
+              </div>
+              <p className="text-sm font-medium text-slate-600 mb-1">Empty board</p>
+              <p className="text-xs">Tap <b className="font-semibold text-slate-700">+ Shape</b> below, or <b className="font-semibold text-slate-700">Import</b> a mindmap from Claude.</p>
+            </div>
+          </div>
+        )}
+
         {editing && (
           <>
             <TextEditOverlay
@@ -924,7 +1013,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
             <EditingTopBar
               shape={editing}
               onToggle={(patch) => updateShape(editing.id, patch, { history: false })}
-              onBump={(delta) => bumpFontSize(editing.id, delta)}
+              onBump={(delta) => bumpFontSize(editing.id, delta, { history: false })}
               onDone={() => setEditingId(null)}
             />
           </>
@@ -936,29 +1025,43 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
           </div>
         )}
 
-        {/* Undo/Redo floating buttons */}
-        <div
-          className="absolute left-2 top-2 z-20 pointer-events-none"
-        >
-          <div className="pointer-events-auto bg-white/90 backdrop-blur border shadow rounded-xl flex">
+        {/* Edge midpoint delete button */}
+        {selectedEdgeId && selectedEdgeMid && (
+          <button
+            onClick={() => deleteEdge(selectedEdgeId)}
+            onPointerDown={(e) => e.stopPropagation()}
+            className="absolute z-20 w-9 h-9 rounded-full bg-white border-2 border-red-500 text-red-500 shadow-lg flex items-center justify-center hover:bg-red-50"
+            style={{
+              left: selectedEdgeMid.x * viewport.scale + viewport.tx - 18,
+              top: selectedEdgeMid.y * viewport.scale + viewport.ty - 18,
+            }}
+            aria-label="Delete connection"
+          >
+            <Icon name="trash" size={16} />
+          </button>
+        )}
+
+        {/* Undo / Redo */}
+        <div className="absolute left-2 z-20 pointer-events-none" style={{ top: "max(8px, env(safe-area-inset-top))" }}>
+          <div className="pointer-events-auto bg-white/95 backdrop-blur border shadow rounded-xl flex">
             <button
               onClick={undo}
               disabled={!canUndo}
-              className="h-10 px-3 text-sm rounded-l-xl hover:bg-slate-100 disabled:opacity-30"
+              className="h-10 w-10 flex items-center justify-center rounded-l-xl text-slate-700 hover:bg-slate-100 disabled:opacity-30 disabled:hover:bg-transparent"
               aria-label="Undo"
               title="Undo (Cmd/Ctrl+Z)"
             >
-              ↶
+              <Icon name="undo" size={18} />
             </button>
             <div className="w-px bg-slate-200" />
             <button
               onClick={redo}
               disabled={!canRedo}
-              className="h-10 px-3 text-sm rounded-r-xl hover:bg-slate-100 disabled:opacity-30"
+              className="h-10 w-10 flex items-center justify-center rounded-r-xl text-slate-700 hover:bg-slate-100 disabled:opacity-30 disabled:hover:bg-transparent"
               aria-label="Redo"
               title="Redo (Cmd/Ctrl+Shift+Z)"
             >
-              ↷
+              <Icon name="redo" size={18} />
             </button>
           </div>
         </div>
@@ -995,7 +1098,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
   );
 }
 
-// ---------- sub-components ----------
+// ---------- ShapeNode (memoized) ----------
 
 const ShapeNode = memo(function ShapeNode({
   shape,
@@ -1024,7 +1127,6 @@ const ShapeNode = memo(function ShapeNode({
           ? "#0ea5e9"
           : shape.stroke;
   const strokeW = editing ? 1.5 : selected || connectSource || connectTarget ? 2.5 : 1.5;
-  const fillColor = effFill(shape);
   const handlePointerDown = (e: React.PointerEvent) => onPointerDown(e, shape);
   const handleDoubleClick = () => onDoubleClick(shape.id);
   const styleProps = { cursor: "move" as const, touchAction: "none" as const };
@@ -1035,7 +1137,7 @@ const ShapeNode = memo(function ShapeNode({
       <rect
         x={shape.x} y={shape.y} width={shape.w} height={shape.h}
         rx={10} ry={10}
-        fill={fillColor} stroke={strokeColor} strokeWidth={strokeW}
+        fill={shape.fill} stroke={strokeColor} strokeWidth={strokeW}
         vectorEffect="non-scaling-stroke"
         onPointerDown={handlePointerDown}
         onDoubleClick={handleDoubleClick}
@@ -1047,7 +1149,7 @@ const ShapeNode = memo(function ShapeNode({
       <ellipse
         cx={shape.x + shape.w / 2} cy={shape.y + shape.h / 2}
         rx={shape.w / 2} ry={shape.h / 2}
-        fill={fillColor} stroke={strokeColor} strokeWidth={strokeW}
+        fill={shape.fill} stroke={strokeColor} strokeWidth={strokeW}
         vectorEffect="non-scaling-stroke"
         onPointerDown={handlePointerDown}
         onDoubleClick={handleDoubleClick}
@@ -1064,7 +1166,7 @@ const ShapeNode = memo(function ShapeNode({
     geometry = (
       <polygon
         points={pts}
-        fill={fillColor} stroke={strokeColor} strokeWidth={strokeW}
+        fill={shape.fill} stroke={strokeColor} strokeWidth={strokeW}
         vectorEffect="non-scaling-stroke"
         onPointerDown={handlePointerDown}
         onDoubleClick={handleDoubleClick}
@@ -1076,7 +1178,7 @@ const ShapeNode = memo(function ShapeNode({
       <rect
         x={shape.x} y={shape.y} width={shape.w} height={shape.h}
         rx={6} ry={6}
-        fill={shape.highlight ? effHighlightColor(shape) : "transparent"}
+        fill="transparent"
         stroke={!editing && (selected || connectSource || connectTarget) ? strokeColor : "transparent"}
         strokeDasharray={!editing && selected ? "4 4" : undefined}
         strokeWidth={1.5}
@@ -1106,21 +1208,35 @@ const ShapeNode = memo(function ShapeNode({
             boxSizing: "border-box",
             color: "#0f172a",
             textAlign: "center",
-            wordBreak: "break-word",
             lineHeight: 1.25,
             userSelect: "none",
             fontSize: effFontSize(shape),
             fontWeight: shape.bold ? 700 : 400,
             fontStyle: shape.italic ? "italic" : "normal",
+            overflow: "hidden",
             visibility: editing ? "hidden" : "visible",
           }}
         >
-          {shape.text}
+          <span
+            style={{
+              backgroundColor: shape.highlight ? effHighlightColor(shape) : "transparent",
+              padding: shape.highlight ? "2px 6px" : 0,
+              borderRadius: shape.highlight ? 4 : 0,
+              wordBreak: "break-word",
+              maxWidth: "100%",
+              boxDecorationBreak: "clone",
+              WebkitBoxDecorationBreak: "clone",
+            }}
+          >
+            {shape.text}
+          </span>
         </div>
       </foreignObject>
     </g>
   );
 });
+
+// ---------- ResizeHandles ----------
 
 function ResizeHandles({
   shape,
@@ -1162,6 +1278,8 @@ function ResizeHandles({
     </>
   );
 }
+
+// ---------- ConnectionDots ----------
 
 function ConnectionDots({
   shape,
@@ -1208,6 +1326,8 @@ function ConnectionDots({
   );
 }
 
+// ---------- TextEditOverlay (contentEditable, span-only highlight) ----------
+
 function TextEditOverlay({
   shape,
   viewport,
@@ -1219,6 +1339,33 @@ function TextEditOverlay({
   onChange: (text: string) => void;
   onDone: () => void;
 }) {
+  const spanRef = useRef<HTMLSpanElement>(null);
+
+  // Mount: seed content, focus, select-all.
+  useEffect(() => {
+    const el = spanRef.current;
+    if (!el) return;
+    el.innerText = shape.text;
+    el.focus();
+    const sel = window.getSelection();
+    if (sel) {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // External text changes (e.g. undo) — only update if different.
+  useEffect(() => {
+    const el = spanRef.current;
+    if (!el) return;
+    if (el.innerText !== shape.text) {
+      el.innerText = shape.text;
+    }
+  }, [shape.text]);
+
   const left = shape.x * viewport.scale + viewport.tx;
   const top = shape.y * viewport.scale + viewport.ty;
   const width = shape.w * viewport.scale;
@@ -1226,70 +1373,89 @@ function TextEditOverlay({
   const fontPx = effFontSize(shape) * viewport.scale;
   const isText = shape.kind === "text";
 
-  const background = shape.highlight
-    ? effHighlightColor(shape)
-    : isText
-      ? "transparent"
-      : shape.fill;
+  const containerBg = isText ? "transparent" : shape.fill;
   const borderRadius = shape.kind === "rect" ? 10 * viewport.scale : isText ? 6 * viewport.scale : 0;
   const clipPath = clipPathFor(shape.kind);
 
   return (
-    <textarea
-      autoFocus
-      value={shape.text}
-      onChange={(e) => onChange(e.target.value)}
-      onKeyDown={(e) => {
-        if (e.key === "Escape" || (e.key === "Enter" && !e.shiftKey)) {
-          e.preventDefault();
-          onDone();
-        }
-      }}
+    <div
+      onPointerDown={(e) => e.stopPropagation()}
       style={{
         position: "absolute",
         left,
         top,
         width,
         height,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
         padding: 8,
         boxSizing: "border-box",
         textAlign: "center",
-        fontSize: fontPx,
-        fontWeight: shape.bold ? 700 : 400,
-        fontStyle: shape.italic ? "italic" : "normal",
-        lineHeight: 1.25,
         color: "#0f172a",
-        background,
+        lineHeight: 1.25,
+        background: containerBg,
         clipPath,
         WebkitClipPath: clipPath,
         borderRadius,
-        border: "none",
-        outline: "none",
         boxShadow: "0 0 0 2px rgba(14,165,233,0.55)",
-        resize: "none",
         overflow: "hidden",
         zIndex: 20,
       }}
-    />
+    >
+      <span
+        ref={spanRef}
+        contentEditable
+        suppressContentEditableWarning
+        onInput={(e) => onChange((e.currentTarget as HTMLSpanElement).innerText)}
+        onPaste={(e) => {
+          e.preventDefault();
+          const text = e.clipboardData.getData("text/plain");
+          document.execCommand("insertText", false, text);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Escape" || (e.key === "Enter" && !e.shiftKey)) {
+            e.preventDefault();
+            onDone();
+          }
+        }}
+        style={{
+          fontSize: fontPx,
+          fontWeight: shape.bold ? 700 : 400,
+          fontStyle: shape.italic ? "italic" : "normal",
+          backgroundColor: shape.highlight ? effHighlightColor(shape) : "transparent",
+          padding: shape.highlight ? "2px 6px" : 0,
+          borderRadius: shape.highlight ? 4 : 0,
+          outline: "none",
+          minWidth: "1ch",
+          maxWidth: "100%",
+          wordBreak: "break-word",
+          whiteSpace: "pre-wrap",
+          boxDecorationBreak: "clone",
+          WebkitBoxDecorationBreak: "clone",
+          caretColor: "#0f172a",
+        }}
+      />
+    </div>
   );
 }
 
-function FmtBtn({
+// ---------- Format toggle helpers ----------
+
+function ToggleBtn({
   active,
-  label,
-  bold,
-  italic,
+  icon,
   preventBlur,
   onActivate,
   ariaLabel,
+  title,
 }: {
   active: boolean;
-  label: string;
-  bold?: boolean;
-  italic?: boolean;
+  icon: IconName;
   preventBlur?: boolean;
   onActivate: () => void;
   ariaLabel: string;
+  title?: string;
 }) {
   return (
     <button
@@ -1297,13 +1463,51 @@ function FmtBtn({
       onClick={onActivate}
       aria-pressed={active}
       aria-label={ariaLabel}
-      className={`h-11 min-w-11 px-2 rounded-xl text-sm ${active ? "bg-slate-900 text-white" : "hover:bg-slate-100"}`}
-      style={{ fontWeight: bold ? 700 : undefined, fontStyle: italic ? "italic" : undefined }}
+      title={title ?? ariaLabel}
+      className={`h-11 min-w-11 px-2 rounded-xl flex items-center justify-center ${
+        active ? "bg-slate-900 text-white" : "text-slate-700 hover:bg-slate-100"
+      }`}
     >
-      {label}
+      <Icon name={icon} size={18} />
     </button>
   );
 }
+
+function IconBtn({
+  icon,
+  onClick,
+  preventBlur,
+  ariaLabel,
+  title,
+  className,
+  variant = "ghost",
+}: {
+  icon: IconName;
+  onClick: () => void;
+  preventBlur?: boolean;
+  ariaLabel: string;
+  title?: string;
+  className?: string;
+  variant?: "ghost" | "danger";
+}) {
+  const variantClass =
+    variant === "danger"
+      ? "text-red-600 hover:bg-red-50"
+      : "text-slate-700 hover:bg-slate-100";
+  return (
+    <button
+      onMouseDown={preventBlur ? (e) => e.preventDefault() : undefined}
+      onClick={onClick}
+      aria-label={ariaLabel}
+      title={title ?? ariaLabel}
+      className={`h-11 min-w-11 px-2 rounded-xl flex items-center justify-center ${variantClass} ${className ?? ""}`}
+    >
+      <Icon name={icon} size={18} />
+    </button>
+  );
+}
+
+// ---------- EditingTopBar ----------
 
 function EditingTopBar({
   shape,
@@ -1323,36 +1527,21 @@ function EditingTopBar({
     >
       <div className="flex flex-col items-center gap-2">
         <div className="pointer-events-auto bg-white border shadow-lg rounded-2xl p-1.5 flex items-center gap-1">
-          <FmtBtn preventBlur label="B" bold active={!!shape.bold} onActivate={() => onToggle({ bold: !shape.bold })} ariaLabel="Bold" />
-          <FmtBtn preventBlur label="I" italic active={!!shape.italic} onActivate={() => onToggle({ italic: !shape.italic })} ariaLabel="Italic" />
-          <FmtBtn preventBlur label="H" active={!!shape.highlight} onActivate={() => onToggle({ highlight: !shape.highlight })} ariaLabel="Highlight" />
+          <ToggleBtn preventBlur icon="bold" active={!!shape.bold} onActivate={() => onToggle({ bold: !shape.bold })} ariaLabel="Bold" />
+          <ToggleBtn preventBlur icon="italic" active={!!shape.italic} onActivate={() => onToggle({ italic: !shape.italic })} ariaLabel="Italic" />
+          <ToggleBtn preventBlur icon="highlighter" active={!!shape.highlight} onActivate={() => onToggle({ highlight: !shape.highlight })} ariaLabel="Highlight" />
           <div className="w-px h-6 bg-slate-200 mx-0.5" />
-          <button
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => onBump(-FONT_STEP)}
-            className="h-11 min-w-11 px-2 rounded-xl hover:bg-slate-100 text-sm"
-            aria-label="Smaller text"
-          >
-            A−
-          </button>
-          <div className="px-1 text-xs text-slate-500 tabular-nums w-8 text-center">
-            {effFontSize(shape)}
-          </div>
-          <button
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => onBump(FONT_STEP)}
-            className="h-11 min-w-11 px-2 rounded-xl hover:bg-slate-100 text-sm"
-            aria-label="Larger text"
-          >
-            A+
-          </button>
+          <IconBtn preventBlur icon="a-arrow-down" onClick={() => onBump(-FONT_STEP)} ariaLabel="Smaller text" />
+          <div className="px-1 text-xs text-slate-500 tabular-nums w-8 text-center">{effFontSize(shape)}</div>
+          <IconBtn preventBlur icon="a-arrow-up" onClick={() => onBump(FONT_STEP)} ariaLabel="Larger text" />
           <div className="w-px h-6 bg-slate-200 mx-0.5" />
           <button
             onMouseDown={(e) => e.preventDefault()}
             onClick={onDone}
-            className="h-11 px-3 rounded-xl bg-slate-900 text-white text-sm font-medium"
+            className="h-11 px-3 rounded-xl bg-slate-900 text-white text-sm font-medium flex items-center gap-1.5"
           >
-            Done ✓
+            <Icon name="check" size={16} />
+            Done
           </button>
         </div>
         {shape.highlight && (
@@ -1374,6 +1563,8 @@ function EditingTopBar({
   );
 }
 
+// ---------- BottomToolbar ----------
+
 function BottomToolbar({
   mode,
   addOpen,
@@ -1389,6 +1580,12 @@ function BottomToolbar({
   onToggleConnect: () => void;
   onImport: () => void;
 }) {
+  const items: { k: ShapeKind; label: string; icon: IconName }[] = [
+    { k: "rect", label: "Rectangle", icon: "square" },
+    { k: "ellipse", label: "Ellipse", icon: "circle" },
+    { k: "diamond", label: "Diamond", icon: "diamond" },
+    { k: "text", label: "Text", icon: "type" },
+  ];
   return (
     <div
       className="absolute left-0 right-0 bottom-0 px-2 pointer-events-none z-10"
@@ -1399,27 +1596,24 @@ function BottomToolbar({
           <div className="relative">
             <button
               onClick={onToggleAdd}
-              className={`px-3 h-11 min-w-11 rounded-xl text-sm font-medium ${addOpen ? "bg-slate-900 text-white" : "hover:bg-slate-100"}`}
+              className={`h-11 px-3 rounded-xl text-sm font-medium flex items-center gap-1.5 ${
+                addOpen ? "bg-slate-900 text-white" : "text-slate-700 hover:bg-slate-100"
+              }`}
               aria-expanded={addOpen}
             >
-              + Shape
+              <Icon name="plus" size={18} />
+              Shape
             </button>
             {addOpen && (
               <div className="absolute bottom-full mb-2 left-0 bg-white border shadow-lg rounded-xl p-1 flex flex-col w-44 z-20">
-                {(
-                  [
-                    ["rect", "▭  Rectangle"],
-                    ["ellipse", "◯  Ellipse"],
-                    ["diamond", "◇  Diamond"],
-                    ["text", "T  Text"],
-                  ] as const
-                ).map(([k, label]) => (
+                {items.map((it) => (
                   <button
-                    key={k}
-                    onClick={() => onAdd(k)}
-                    className="px-3 h-11 text-left rounded-lg hover:bg-slate-100 text-sm"
+                    key={it.k}
+                    onClick={() => onAdd(it.k)}
+                    className="h-11 px-3 text-left rounded-lg hover:bg-slate-100 text-sm text-slate-700 flex items-center gap-2"
                   >
-                    {label}
+                    <Icon name={it.icon} size={16} />
+                    {it.label}
                   </button>
                 ))}
               </div>
@@ -1427,22 +1621,28 @@ function BottomToolbar({
           </div>
           <button
             onClick={onToggleConnect}
-            className={`px-3 h-11 min-w-11 rounded-xl text-sm font-medium ${mode === "connect" ? "bg-slate-900 text-white" : "hover:bg-slate-100"}`}
+            className={`h-11 px-3 rounded-xl text-sm font-medium flex items-center gap-1.5 ${
+              mode === "connect" ? "bg-slate-900 text-white" : "text-slate-700 hover:bg-slate-100"
+            }`}
             aria-pressed={mode === "connect"}
           >
-            ↔ Connect
+            <Icon name="share" size={18} />
+            Connect
           </button>
           <button
             onClick={onImport}
-            className="px-3 h-11 min-w-11 rounded-xl text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-700"
+            className="h-11 px-3 rounded-xl text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-700 flex items-center gap-1.5"
           >
-            📋 Import
+            <Icon name="clipboard" size={18} />
+            Import
           </button>
         </div>
       </div>
     </div>
   );
 }
+
+// ---------- Inspector ----------
 
 function Inspector({
   shape,
@@ -1467,50 +1667,17 @@ function Inspector({
       <div className="flex justify-center">
         <div className="pointer-events-auto bg-white border shadow-lg rounded-2xl p-2 w-full max-w-md flex flex-col gap-2">
           <div className="flex items-center gap-1">
-            <FmtBtn label="B" bold active={!!shape.bold} onActivate={() => onChange({ bold: !shape.bold })} ariaLabel="Bold" />
-            <FmtBtn label="I" italic active={!!shape.italic} onActivate={() => onChange({ italic: !shape.italic })} ariaLabel="Italic" />
-            <FmtBtn label="H" active={!!shape.highlight} onActivate={() => onChange({ highlight: !shape.highlight })} ariaLabel="Highlight" />
+            <ToggleBtn icon="bold" active={!!shape.bold} onActivate={() => onChange({ bold: !shape.bold })} ariaLabel="Bold" />
+            <ToggleBtn icon="italic" active={!!shape.italic} onActivate={() => onChange({ italic: !shape.italic })} ariaLabel="Italic" />
+            <ToggleBtn icon="highlighter" active={!!shape.highlight} onActivate={() => onChange({ highlight: !shape.highlight })} ariaLabel="Highlight" />
             <div className="w-px h-6 bg-slate-200 mx-0.5" />
-            <button
-              onClick={() => onBump(-FONT_STEP)}
-              className="h-11 min-w-11 px-2 rounded-xl hover:bg-slate-100 text-sm"
-              aria-label="Smaller text"
-            >
-              A−
-            </button>
-            <div className="px-1 text-xs text-slate-500 tabular-nums w-8 text-center">
-              {effFontSize(shape)}
-            </div>
-            <button
-              onClick={() => onBump(FONT_STEP)}
-              className="h-11 min-w-11 px-2 rounded-xl hover:bg-slate-100 text-sm"
-              aria-label="Larger text"
-            >
-              A+
-            </button>
+            <IconBtn icon="a-arrow-down" onClick={() => onBump(-FONT_STEP)} ariaLabel="Smaller text" />
+            <div className="px-1 text-xs text-slate-500 tabular-nums w-8 text-center">{effFontSize(shape)}</div>
+            <IconBtn icon="a-arrow-up" onClick={() => onBump(FONT_STEP)} ariaLabel="Larger text" />
             <div className="flex-1" />
-            <button
-              onClick={onEditText}
-              className="h-11 min-w-11 px-3 rounded-xl hover:bg-slate-100 text-sm"
-              aria-label="Edit text"
-            >
-              ✎
-            </button>
-            <button
-              onClick={onDuplicate}
-              className="h-11 min-w-11 px-3 rounded-xl hover:bg-slate-100 text-sm"
-              aria-label="Duplicate"
-              title="Duplicate (Cmd/Ctrl+D)"
-            >
-              ⎘
-            </button>
-            <button
-              onClick={onDelete}
-              className="h-11 min-w-11 px-3 rounded-xl hover:bg-red-50 text-red-600 text-sm"
-              aria-label="Delete shape"
-            >
-              🗑
-            </button>
+            <IconBtn icon="pencil" onClick={onEditText} ariaLabel="Edit text" />
+            <IconBtn icon="copy" onClick={onDuplicate} ariaLabel="Duplicate" title="Duplicate (Cmd/Ctrl+D)" />
+            <IconBtn icon="trash" onClick={onDelete} ariaLabel="Delete shape" variant="danger" />
           </div>
           <div className="flex items-center gap-1.5 px-1">
             <span className="text-[10px] uppercase tracking-wide text-slate-400 w-8 shrink-0">Fill</span>
