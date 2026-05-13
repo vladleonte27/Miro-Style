@@ -388,16 +388,23 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     setHistoryVersion((v) => v + 1);
   }, [snapshot]);
 
-  // Wheel zoom — attached to the canvas container so it fires no matter
-  // which child element is under the cursor (SVG, foreignObject HTML, link
-  // card thumbnail, floating inspector buttons, etc).
+  // Wheel zoom — listener lives on `window` so it can't be missed by any
+  // child element's event handling. We then gate by:
+  //   - target must be inside the canvas container (so the page chrome /
+  //     boards list isn't hijacked when this component is on screen)
+  //   - target must NOT be inside an input / textarea / contenteditable
+  //     (so the import-dialog textarea, the inline text editor, and the
+  //     board-name input still scroll naturally).
   useEffect(() => {
-    const container = canvasRef.current;
-    if (!container) return;
     function onWheel(e: WheelEvent) {
-      e.preventDefault();
+      const container = canvasRef.current;
       const svg = svgRef.current;
-      if (!svg) return;
+      if (!container || !svg) return;
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      if (target.closest("textarea, input, select, [contenteditable=\"true\"]")) return;
+      if (!container.contains(target)) return;
+      e.preventDefault();
       const rect = svg.getBoundingClientRect();
       const sx = e.clientX - rect.left;
       const sy = e.clientY - rect.top;
@@ -410,8 +417,8 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
         return { scale, tx: sx - bx * scale, ty: sy - by * scale };
       });
     }
-    container.addEventListener("wheel", onWheel, { passive: false });
-    return () => container.removeEventListener("wheel", onWheel);
+    window.addEventListener("wheel", onWheel, { passive: false });
+    return () => window.removeEventListener("wheel", onWheel);
   }, []);
 
   // Pointer handlers (rAF coalesced)
