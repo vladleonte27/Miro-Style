@@ -4,7 +4,7 @@ import type { Anchor, Board, Edge, Shape, ShapeKind, TextAlign } from "./types";
 import { newId } from "./id";
 
 const KEY = "miro-style:boards:v1";
-const VALID_KINDS: ShapeKind[] = ["rect", "ellipse", "diamond", "text", "image"];
+const VALID_KINDS: ShapeKind[] = ["rect", "ellipse", "diamond", "text", "image", "link"];
 const VALID_ANCHORS: Anchor[] = ["top", "right", "bottom", "left"];
 const VALID_ALIGNS: TextAlign[] = ["left", "center", "right"];
 
@@ -40,6 +40,10 @@ function sanitizeShape(raw: unknown): Shape | null {
         : undefined,
     bullet: typeof s.bullet === "boolean" ? s.bullet : undefined,
     src: typeof s.src === "string" ? s.src : undefined,
+    href: typeof s.href === "string" ? s.href : undefined,
+    linkTitle: typeof s.linkTitle === "string" ? s.linkTitle : undefined,
+    linkThumbnail: typeof s.linkThumbnail === "string" ? s.linkThumbnail : undefined,
+    linkProvider: typeof s.linkProvider === "string" ? s.linkProvider : undefined,
   };
 }
 

@@ -30,7 +30,12 @@ export type IconName =
   | "heading-2"
   | "heading-3"
   | "pilcrow"
-  | "list";
+  | "list"
+  | "mic"
+  | "mic-recording"
+  | "link"
+  | "external-link"
+  | "play";
 
 const PATHS: Record<IconName, ReactNode> = {
   "arrow-left": (
@@ -220,6 +225,37 @@ const PATHS: Record<IconName, ReactNode> = {
       <path d="M8 12h13" />
       <path d="M8 18h13" />
     </>
+  ),
+  mic: (
+    <>
+      <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+      <line x1="12" x2="12" y1="19" y2="22" />
+    </>
+  ),
+  "mic-recording": (
+    <>
+      <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+      <line x1="12" x2="12" y1="19" y2="22" />
+      <circle cx="19" cy="5" r="2.5" fill="currentColor" stroke="none" />
+    </>
+  ),
+  link: (
+    <>
+      <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+      <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+    </>
+  ),
+  "external-link": (
+    <>
+      <path d="M15 3h6v6" />
+      <path d="M10 14 21 3" />
+      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+    </>
+  ),
+  play: (
+    <polygon points="6 3 20 12 6 21" />
   ),
 };
 

@@ -1,4 +1,4 @@
-export type ShapeKind = "rect" | "ellipse" | "diamond" | "text" | "image";
+export type ShapeKind = "rect" | "ellipse" | "diamond" | "text" | "image" | "link";
 export type Anchor = "top" | "right" | "bottom" | "left";
 export type TextAlign = "left" | "center" | "right";
 
@@ -20,6 +20,11 @@ export interface Shape {
   textAlign?: TextAlign;
   bullet?: boolean;
   src?: string;
+  // Link card fields
+  href?: string;
+  linkTitle?: string;
+  linkThumbnail?: string;
+  linkProvider?: string;
 }
 
 export interface Edge {

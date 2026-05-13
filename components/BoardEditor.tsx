@@ -13,7 +13,11 @@ import type { Anchor, Board, Edge, Shape, ShapeKind, TextAlign } from "@/lib/typ
 import { newId } from "@/lib/id";
 import { layoutMindmap, type MindmapNode } from "@/lib/mindmap";
 import ImportDialog from "./ImportDialog";
+import VoiceCaptureDialog from "./VoiceCaptureDialog";
+import LinkDialog, { type LinkPreview } from "./LinkDialog";
 import { Icon, type IconName } from "./icons";
+
+type AddItem = ShapeKind | "voice";
 
 type Mode = "select" | "connect";
 type Corner = "nw" | "ne" | "sw" | "se";
@@ -30,7 +34,7 @@ type Drag =
   | { kind: "pinch"; initialDist: number; initialScale: number; initialTx: number; initialTy: number; centerSx: number; centerSy: number }
   | { kind: "connecting"; fromId: string; fromAnchor: Anchor };
 
-const DEFAULTS: Record<Exclude<ShapeKind, "image">, Pick<Shape, "w" | "h" | "fill" | "stroke" | "fontSize">> = {
+const DEFAULTS: Record<Exclude<ShapeKind, "image" | "link">, Pick<Shape, "w" | "h" | "fill" | "stroke" | "fontSize">> = {
   rect: { w: 160, h: 96, fill: "#fef3c7", stroke: "#1f2937", fontSize: 14 },
   ellipse: { w: 160, h: 96, fill: "#dbeafe", stroke: "#1f2937", fontSize: 14 },
   diamond: { w: 144, h: 124, fill: "#dcfce7", stroke: "#1f2937", fontSize: 14 },
@@ -261,6 +265,8 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
   const [edgeFromId, setEdgeFromId] = useState<string | null>(null);
   const [viewport, setViewport] = useState<Viewport>({ tx: 0, ty: 0, scale: 1 });
   const [importOpen, setImportOpen] = useState(false);
+  const [voiceOpen, setVoiceOpen] = useState(false);
+  const [linkOpen, setLinkOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [name, setName] = useState("");
@@ -710,7 +716,17 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     };
   }
 
-  function addShape(kind: ShapeKind) {
+  function addShape(kind: AddItem) {
+    if (kind === "voice") {
+      setAddOpen(false);
+      setVoiceOpen(true);
+      return;
+    }
+    if (kind === "link") {
+      setAddOpen(false);
+      setLinkOpen(true);
+      return;
+    }
     if (kind === "image") {
       setAddOpen(false);
       const input = document.createElement("input");
@@ -744,6 +760,54 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     setSelectedId(s.id);
     setSelectedEdgeId(null);
     setAddOpen(false);
+  }
+
+  function handleVoiceCommit(transcript: string) {
+    const text = transcript.trim();
+    if (!text) return;
+    pushHistory(snapshot());
+    const { x, y } = viewportCenter();
+    const w = 280, h = 180;
+    const s: Shape = {
+      id: newId("s_"),
+      kind: "rect",
+      x: x - w / 2,
+      y: y - h / 2,
+      w,
+      h,
+      text,
+      fill: "#fef3c7",
+      stroke: "#f59e0b",
+      fontSize: 14,
+      textAlign: "left",
+    };
+    setShapes((ss) => [...ss, s]);
+    setSelectedId(s.id);
+    setSelectedEdgeId(null);
+  }
+
+  function handleLinkCommit(preview: LinkPreview) {
+    pushHistory(snapshot());
+    const { x, y } = viewportCenter();
+    const w = 280, h = preview.thumbnail ? 240 : 120;
+    const s: Shape = {
+      id: newId("s_"),
+      kind: "link",
+      x: x - w / 2,
+      y: y - h / 2,
+      w,
+      h,
+      text: "",
+      fill: "#ffffff",
+      stroke: "transparent",
+      href: preview.href,
+      linkTitle: preview.title,
+      linkThumbnail: preview.thumbnail,
+      linkProvider: preview.provider,
+    };
+    setShapes((ss) => [...ss, s]);
+    setSelectedId(s.id);
+    setSelectedEdgeId(null);
   }
 
   const onShapePointerDown = useCallback((e: React.PointerEvent, s: Shape) => {
@@ -793,7 +857,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
 
   const onShapeDoubleClick = useCallback((id: string) => {
     const s = shapesRef.current.find((sh) => sh.id === id);
-    if (!s || s.kind === "image") return; // images don't have editable text
+    if (!s || s.kind === "image" || s.kind === "link") return; // cards don't have editable text
     pushHistory(snapshot());
     setEditingId(id);
     setSelectedId(id);
@@ -1259,6 +1323,17 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
               onDuplicate={() => duplicateShape(selected.id)}
               onDelete={() => deleteShape(selected.id)}
             />
+          ) : selected.kind === "link" ? (
+            <LinkInspector
+              shape={selected}
+              onOpen={() => {
+                if (selected.href) {
+                  window.open(selected.href, "_blank", "noopener,noreferrer");
+                }
+              }}
+              onDuplicate={() => duplicateShape(selected.id)}
+              onDelete={() => deleteShape(selected.id)}
+            />
           ) : (
             <Inspector
               shape={selected}
@@ -1288,6 +1363,16 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
         open={importOpen}
         onClose={() => setImportOpen(false)}
         onImport={applyMindmap}
+      />
+      <VoiceCaptureDialog
+        open={voiceOpen}
+        onClose={() => setVoiceOpen(false)}
+        onCommit={handleVoiceCommit}
+      />
+      <LinkDialog
+        open={linkOpen}
+        onClose={() => setLinkOpen(false)}
+        onCommit={handleLinkCommit}
       />
     </div>
   );
@@ -1428,6 +1513,127 @@ const ShapeNode = memo(function ShapeNode({
         />
       </g>
     );
+  } else if (shape.kind === "link") {
+    const cornerRadius = Math.min(shape.w, shape.h) * 0.04;
+    let hostname = "";
+    try { hostname = new URL(shape.href || "").hostname.replace(/^www\./, ""); } catch {}
+    geometry = (
+      <g>
+        <foreignObject x={shape.x} y={shape.y} width={shape.w} height={shape.h}>
+          <div
+            onPointerDown={handlePointerDown}
+            onDoubleClick={handleDoubleClick}
+            style={{
+              width: "100%",
+              height: "100%",
+              background: "#ffffff",
+              border: "1px solid #e2e8f0",
+              borderRadius: "4%",
+              overflow: "hidden",
+              cursor: "move",
+              touchAction: "none",
+              display: "flex",
+              flexDirection: "column",
+              boxSizing: "border-box",
+            }}
+          >
+            {shape.linkThumbnail && (
+              <div style={{
+                position: "relative",
+                flex: "0 0 60%",
+                overflow: "hidden",
+                background: "#f1f5f9",
+                minHeight: 0,
+              }}>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={shape.linkThumbnail}
+                  alt=""
+                  draggable={false}
+                  style={{
+                    width: "100%",
+                    height: "100%",
+                    objectFit: "cover",
+                    display: "block",
+                    pointerEvents: "none",
+                    userSelect: "none",
+                  }}
+                />
+                {shape.linkProvider === "YouTube" && (
+                  <div style={{
+                    position: "absolute",
+                    inset: 0,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    pointerEvents: "none",
+                  }}>
+                    <div style={{
+                      width: 56,
+                      height: 40,
+                      borderRadius: 8,
+                      background: "rgba(0,0,0,0.78)",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      color: "white",
+                      paddingLeft: 3,
+                    }}>
+                      <Icon name="play" size={20} />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+            <div style={{
+              padding: 12,
+              flex: "1 1 auto",
+              display: "flex",
+              flexDirection: "column",
+              gap: 4,
+              overflow: "hidden",
+              minHeight: 0,
+            }}>
+              <div style={{
+                fontSize: 13,
+                fontWeight: 600,
+                color: "#0f172a",
+                lineHeight: 1.3,
+                overflow: "hidden",
+                display: "-webkit-box",
+                WebkitLineClamp: 2,
+                WebkitBoxOrient: "vertical",
+                wordBreak: "break-word",
+              }}>
+                {shape.linkTitle || shape.href || "Link"}
+              </div>
+              <div style={{
+                fontSize: 10,
+                color: "#64748b",
+                textTransform: "uppercase",
+                letterSpacing: 0.5,
+                fontWeight: 500,
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}>
+                {shape.linkProvider || "Web"}
+                {hostname && <> · {hostname}</>}
+              </div>
+            </div>
+          </div>
+        </foreignObject>
+        <rect
+          x={shape.x} y={shape.y} width={shape.w} height={shape.h}
+          rx={cornerRadius} ry={cornerRadius}
+          fill="none"
+          stroke={selected || connectSource || connectTarget ? strokeColor : "transparent"}
+          strokeWidth={selected || connectSource || connectTarget ? 2.5 : 0}
+          vectorEffect="non-scaling-stroke"
+          pointerEvents="none"
+        />
+      </g>
+    );
   } else {
     // text shape
     geometry = (
@@ -1446,7 +1652,7 @@ const ShapeNode = memo(function ShapeNode({
     );
   }
 
-  if (shape.kind === "image") {
+  if (shape.kind === "image" || shape.kind === "link") {
     return <g>{geometry}</g>;
   }
 
@@ -1963,16 +2169,18 @@ function BottomToolbar({
   mode: Mode;
   addOpen: boolean;
   onToggleAdd: () => void;
-  onAdd: (k: ShapeKind) => void;
+  onAdd: (k: AddItem) => void;
   onToggleConnect: () => void;
   onImport: () => void;
 }) {
-  const items: { k: ShapeKind; label: string; icon: IconName }[] = [
+  const items: { k: AddItem; label: string; icon: IconName }[] = [
     { k: "rect", label: "Rectangle", icon: "square" },
     { k: "ellipse", label: "Ellipse", icon: "circle" },
     { k: "diamond", label: "Diamond", icon: "diamond" },
     { k: "text", label: "Text", icon: "type" },
     { k: "image", label: "Image", icon: "image" },
+    { k: "link", label: "Link", icon: "link" },
+    { k: "voice", label: "Voice note", icon: "mic" },
   ];
   return (
     <div
@@ -2134,6 +2342,44 @@ function ImageInspector({
           <div className="w-px h-6 bg-slate-200 mx-0.5" />
           <IconBtn icon="copy" onClick={onDuplicate} ariaLabel="Duplicate" title="Duplicate (Cmd/Ctrl+D)" />
           <IconBtn icon="trash" onClick={onDelete} ariaLabel="Delete image" variant="danger" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LinkInspector({
+  shape,
+  onOpen,
+  onDuplicate,
+  onDelete,
+}: {
+  shape: Shape;
+  onOpen: () => void;
+  onDuplicate: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div
+      className="absolute left-2 right-2 bottom-0 z-10 pointer-events-none"
+      style={{ paddingBottom: "max(8px, env(safe-area-inset-bottom))" }}
+    >
+      <div className="flex justify-center">
+        <div className="pointer-events-auto bg-white border shadow-lg rounded-2xl p-2 flex items-center gap-1 max-w-md w-full">
+          <div className="px-3 text-xs text-slate-500 flex items-center gap-1.5 min-w-0 flex-1">
+            <Icon name="link" size={14} />
+            <span className="truncate">{shape.linkProvider || "Link"}</span>
+          </div>
+          <button
+            onClick={onOpen}
+            className="h-11 px-3 rounded-xl bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 flex items-center gap-1.5"
+            disabled={!shape.href}
+          >
+            <Icon name="external-link" size={16} />
+            Open
+          </button>
+          <IconBtn icon="copy" onClick={onDuplicate} ariaLabel="Duplicate" title="Duplicate (Cmd/Ctrl+D)" />
+          <IconBtn icon="trash" onClick={onDelete} ariaLabel="Delete link" variant="danger" />
         </div>
       </div>
     </div>
