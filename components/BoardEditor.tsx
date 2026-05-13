@@ -33,10 +33,11 @@ const DEFAULTS: Record<ShapeKind, Pick<Shape, "w" | "h" | "fill" | "stroke" | "f
 };
 
 const SWATCHES = ["#fef3c7", "#dbeafe", "#dcfce7", "#fbcfe8", "#ddd6fe", "#fed7aa", "#fecaca", "#ffffff"];
+const HIGHLIGHT_SWATCHES = ["#fde047", "#86efac", "#fda4af", "#93c5fd", "#c4b5fd", "#fdba74"];
+const DEFAULT_HIGHLIGHT = "#fde047";
 const FONT_MIN = 10;
 const FONT_MAX = 72;
 const FONT_STEP = 2;
-const HIGHLIGHT_COLOR = "#fde047";
 
 function clamp(v: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, v));
@@ -46,6 +47,17 @@ function shapeCenter(s: Shape) {
 }
 function effFontSize(s: Shape): number {
   return s.fontSize ?? (s.kind === "text" ? 18 : 14);
+}
+function effHighlightColor(s: Shape): string {
+  return s.highlightColor ?? DEFAULT_HIGHLIGHT;
+}
+function effFill(s: Shape): string {
+  return s.highlight ? effHighlightColor(s) : s.fill;
+}
+function clipPathFor(kind: ShapeKind): string | undefined {
+  if (kind === "ellipse") return "ellipse(50% 50% at 50% 50%)";
+  if (kind === "diamond") return "polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%)";
+  return undefined;
 }
 function pointInShape(s: Shape, x: number, y: number): boolean {
   return x >= s.x && x <= s.x + s.w && y >= s.y && y <= s.y + s.h;
@@ -528,6 +540,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
                 key={s.id}
                 shape={s}
                 selected={s.id === selectedId}
+                editing={s.id === editingId}
                 connectSource={s.id === edgeFromId || s.id === connectPreview?.fromId}
                 connectTarget={s.id === connectPreview?.targetId}
                 onPointerDown={(e) => onShapePointerDown(e, s)}
@@ -614,6 +627,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
 function ShapeNode({
   shape,
   selected,
+  editing,
   connectSource,
   connectTarget,
   onPointerDown,
@@ -621,19 +635,25 @@ function ShapeNode({
 }: {
   shape: Shape;
   selected: boolean;
+  editing: boolean;
   connectSource: boolean;
   connectTarget: boolean;
   onPointerDown: (e: React.PointerEvent) => void;
   onDoubleClick: () => void;
 }) {
-  const strokeColor = connectTarget
-    ? "#22c55e"
-    : connectSource
-      ? "#6366f1"
-      : selected
-        ? "#0ea5e9"
-        : shape.stroke;
-  const strokeW = selected || connectSource || connectTarget ? 2.5 : 1.5;
+  // While editing, render the shape in its final (un-selected) styling so the
+  // textarea overlay matches what the user will see when they're done.
+  const strokeColor = editing
+    ? shape.stroke
+    : connectTarget
+      ? "#22c55e"
+      : connectSource
+        ? "#6366f1"
+        : selected
+          ? "#0ea5e9"
+          : shape.stroke;
+  const strokeW = editing ? 1.5 : selected || connectSource || connectTarget ? 2.5 : 1.5;
+  const fillColor = effFill(shape);
   const handlers = {
     onPointerDown,
     onDoubleClick,
@@ -646,7 +666,7 @@ function ShapeNode({
       <rect
         x={shape.x} y={shape.y} width={shape.w} height={shape.h}
         rx={10} ry={10}
-        fill={shape.fill} stroke={strokeColor} strokeWidth={strokeW}
+        fill={fillColor} stroke={strokeColor} strokeWidth={strokeW}
         vectorEffect="non-scaling-stroke" {...handlers}
       />
     );
@@ -655,7 +675,7 @@ function ShapeNode({
       <ellipse
         cx={shape.x + shape.w / 2} cy={shape.y + shape.h / 2}
         rx={shape.w / 2} ry={shape.h / 2}
-        fill={shape.fill} stroke={strokeColor} strokeWidth={strokeW}
+        fill={fillColor} stroke={strokeColor} strokeWidth={strokeW}
         vectorEffect="non-scaling-stroke" {...handlers}
       />
     );
@@ -669,17 +689,19 @@ function ShapeNode({
     geometry = (
       <polygon
         points={pts}
-        fill={shape.fill} stroke={strokeColor} strokeWidth={strokeW}
+        fill={fillColor} stroke={strokeColor} strokeWidth={strokeW}
         vectorEffect="non-scaling-stroke" {...handlers}
       />
     );
   } else {
+    // Text shape: transparent rect by default; highlight fills it when on.
     geometry = (
       <rect
         x={shape.x} y={shape.y} width={shape.w} height={shape.h}
-        fill="transparent"
-        stroke={selected || connectSource || connectTarget ? strokeColor : "transparent"}
-        strokeDasharray={selected ? "4 4" : undefined}
+        rx={6} ry={6}
+        fill={shape.highlight ? effHighlightColor(shape) : "transparent"}
+        stroke={!editing && (selected || connectSource || connectTarget) ? strokeColor : "transparent"}
+        strokeDasharray={!editing && selected ? "4 4" : undefined}
         strokeWidth={1.5}
         vectorEffect="non-scaling-stroke" {...handlers}
       />
@@ -710,17 +732,10 @@ function ShapeNode({
             fontSize: effFontSize(shape),
             fontWeight: shape.bold ? 700 : 400,
             fontStyle: shape.italic ? "italic" : "normal",
+            visibility: editing ? "hidden" : "visible",
           }}
         >
-          <span
-            style={{
-              backgroundColor: shape.highlight ? HIGHLIGHT_COLOR : "transparent",
-              padding: shape.highlight ? "2px 6px" : 0,
-              borderRadius: 4,
-            }}
-          >
-            {shape.text}
-          </span>
+          {shape.text}
         </div>
       </foreignObject>
     </g>
@@ -823,6 +838,16 @@ function TextEditOverlay({
   const width = shape.w * viewport.scale;
   const height = shape.h * viewport.scale;
   const fontPx = effFontSize(shape) * viewport.scale;
+  const isText = shape.kind === "text";
+
+  // Match the rendered shape's interior so the textarea is a true preview.
+  const background = shape.highlight
+    ? effHighlightColor(shape)
+    : isText
+      ? "transparent"
+      : shape.fill;
+  const borderRadius = shape.kind === "rect" ? 10 * viewport.scale : isText ? 6 * viewport.scale : 0;
+  const clipPath = clipPathFor(shape.kind);
 
   return (
     <textarea
@@ -840,19 +865,25 @@ function TextEditOverlay({
         left,
         top,
         width,
-        height: Math.max(height, 44),
+        height,
+        // Identical to the foreignObject div inside ShapeNode:
         padding: 8,
         boxSizing: "border-box",
         textAlign: "center",
-        fontSize: Math.max(14, fontPx),
+        fontSize: fontPx,
         fontWeight: shape.bold ? 700 : 400,
         fontStyle: shape.italic ? "italic" : "normal",
         lineHeight: 1.25,
-        border: "2px solid #0ea5e9",
-        borderRadius: 8,
-        background: shape.highlight ? HIGHLIGHT_COLOR : "white",
-        resize: "none",
+        color: "#0f172a",
+        background,
+        clipPath,
+        WebkitClipPath: clipPath,
+        borderRadius,
+        border: "none",
         outline: "none",
+        boxShadow: "0 0 0 2px rgba(14,165,233,0.55)",
+        resize: "none",
+        overflow: "hidden",
         zIndex: 20,
       }}
     />
@@ -904,7 +935,7 @@ function EditingTopBar({
       className="absolute left-0 right-0 px-2 z-40 pointer-events-none"
       style={{ top: "max(8px, env(safe-area-inset-top))" }}
     >
-      <div className="flex justify-center">
+      <div className="flex flex-col items-center gap-2">
         <div className="pointer-events-auto bg-white border shadow-lg rounded-2xl p-1.5 flex items-center gap-1">
           <FmtBtn label="B" bold active={!!shape.bold} onActivate={() => onToggle({ bold: !shape.bold })} ariaLabel="Bold" />
           <FmtBtn label="I" italic active={!!shape.italic} onActivate={() => onToggle({ italic: !shape.italic })} ariaLabel="Italic" />
@@ -938,6 +969,20 @@ function EditingTopBar({
             Done ✓
           </button>
         </div>
+        {shape.highlight && (
+          <div className="pointer-events-auto bg-white border shadow-lg rounded-2xl p-1.5 flex items-center gap-1.5">
+            {HIGHLIGHT_SWATCHES.map((c) => (
+              <button
+                key={c}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => onToggle({ highlightColor: c })}
+                className={`w-7 h-7 rounded-full border ${effHighlightColor(shape) === c ? "ring-2 ring-slate-900 ring-offset-1" : ""}`}
+                style={{ background: c }}
+                aria-label={`Highlight ${c}`}
+              />
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1072,18 +1117,38 @@ function Inspector({
               🗑
             </button>
           </div>
-          {/* Row 2: colors */}
-          <div className="flex flex-wrap gap-1.5 px-1">
-            {SWATCHES.map((c) => (
-              <button
-                key={c}
-                onClick={() => onChange({ fill: c })}
-                className={`w-8 h-8 rounded-full border ${shape.fill === c ? "ring-2 ring-slate-900 ring-offset-1" : ""}`}
-                style={{ background: c }}
-                aria-label={`Fill ${c}`}
-              />
-            ))}
+          {/* Row 2: fill colors */}
+          <div className="flex items-center gap-1.5 px-1">
+            <span className="text-[10px] uppercase tracking-wide text-slate-400 w-8 shrink-0">Fill</span>
+            <div className="flex flex-wrap gap-1.5">
+              {SWATCHES.map((c) => (
+                <button
+                  key={c}
+                  onClick={() => onChange({ fill: c })}
+                  className={`w-7 h-7 rounded-full border ${shape.fill === c ? "ring-2 ring-slate-900 ring-offset-1" : ""}`}
+                  style={{ background: c }}
+                  aria-label={`Fill ${c}`}
+                />
+              ))}
+            </div>
           </div>
+          {/* Row 3: highlight colors (only when highlight is on) */}
+          {shape.highlight && (
+            <div className="flex items-center gap-1.5 px-1">
+              <span className="text-[10px] uppercase tracking-wide text-slate-400 w-8 shrink-0">Hi</span>
+              <div className="flex flex-wrap gap-1.5">
+                {HIGHLIGHT_SWATCHES.map((c) => (
+                  <button
+                    key={c}
+                    onClick={() => onChange({ highlightColor: c })}
+                    className={`w-7 h-7 rounded-full border ${effHighlightColor(shape) === c ? "ring-2 ring-slate-900 ring-offset-1" : ""}`}
+                    style={{ background: c }}
+                    aria-label={`Highlight ${c}`}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

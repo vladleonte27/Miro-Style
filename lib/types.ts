@@ -14,6 +14,7 @@ export interface Shape {
   bold?: boolean;
   italic?: boolean;
   highlight?: boolean;
+  highlightColor?: string;
 }
 
 export interface Edge {
