@@ -221,14 +221,29 @@ function resizeImage(dataUrl: string, maxDim: number): Promise<{ src: string; w:
       canvas.height = Math.round(h);
       const ctx = canvas.getContext("2d");
       if (!ctx) { resolve({ src: dataUrl, w: Math.round(w), h: Math.round(h) }); return; }
-      ctx.drawImage(img, 0, 0, w, h);
       const isPng = dataUrl.startsWith("data:image/png");
+      // JPEG can't represent transparency — fill white first so transparent
+      // source pixels don't become black after re-encode.
+      if (!isPng) {
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+      ctx.drawImage(img, 0, 0, w, h);
       const mime = isPng ? "image/png" : "image/jpeg";
-      const out = isPng ? canvas.toDataURL(mime) : canvas.toDataURL(mime, 0.85);
+      const out = isPng ? canvas.toDataURL(mime) : canvas.toDataURL(mime, 0.9);
       resolve({ src: out, w: canvas.width, h: canvas.height });
     };
     img.onerror = () => reject(new Error("Failed to load image"));
     img.src = dataUrl;
+  });
+}
+
+function loadImageMeta(src: string): Promise<{ w: number; h: number }> {
+  return new Promise((resolve, reject) => {
+    const img = new window.Image();
+    img.onload = () => resolve({ w: img.width || 200, h: img.height || 200 });
+    img.onerror = () => reject(new Error("Failed to load image"));
+    img.src = src;
   });
 }
 
@@ -438,6 +453,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       if (d.kind === "resize") {
         const dxBoard = (sx - d.startSx) / d.scale;
         const dyBoard = (sy - d.startSy) / d.scale;
+        const shiftLock = e.shiftKey;
         setShapes((ss) =>
           ss.map((s) => {
             if (s.id !== d.id) return s;
@@ -447,7 +463,26 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
             if (d.corner === "ne") { ny = o.y + dyBoard; nh = o.h - dyBoard; nw = o.w + dxBoard; }
             if (d.corner === "sw") { nx = o.x + dxBoard; nw = o.w - dxBoard; nh = o.h + dyBoard; }
             if (d.corner === "nw") { nx = o.x + dxBoard; ny = o.y + dyBoard; nw = o.w - dxBoard; nh = o.h - dyBoard; }
-            return { ...s, x: nx, y: ny, w: Math.max(40, nw), h: Math.max(32, nh) };
+            nw = Math.max(40, nw);
+            nh = Math.max(32, nh);
+            if (shiftLock && o.w > 0 && o.h > 0) {
+              const aspect = o.w / o.h;
+              const candAspect = nw / nh;
+              if (candAspect > aspect) {
+                const newW = nh * aspect;
+                if (d.corner === "nw" || d.corner === "sw") {
+                  nx = o.x + o.w - newW;
+                }
+                nw = newW;
+              } else {
+                const newH = nw / aspect;
+                if (d.corner === "nw" || d.corner === "ne") {
+                  ny = o.y + o.h - newH;
+                }
+                nh = newH;
+              }
+            }
+            return { ...s, x: nx, y: ny, w: nw, h: nh };
           }),
         );
       }
@@ -562,9 +597,21 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     if (!file.type.startsWith("image/")) return;
     try {
       const original = await readFileAsDataURL(file);
-      const resized = await resizeImage(original, IMAGE_MAX_DIM);
-      const aspect = resized.w / resized.h;
-      let w = Math.min(resized.w, IMAGE_DEFAULT_DISPLAY);
+      // For small / reasonable-size sources, keep the original bytes —
+      // avoids any canvas re-encode that could clobber colors/transparency.
+      let result: { src: string; w: number; h: number };
+      if (file.size < 600_000) {
+        const meta = await loadImageMeta(original);
+        if (Math.max(meta.w, meta.h) <= IMAGE_MAX_DIM * 1.5) {
+          result = { src: original, w: meta.w, h: meta.h };
+        } else {
+          result = await resizeImage(original, IMAGE_MAX_DIM);
+        }
+      } else {
+        result = await resizeImage(original, IMAGE_MAX_DIM);
+      }
+      const aspect = result.w / result.h;
+      let w = Math.min(result.w, IMAGE_DEFAULT_DISPLAY);
       let h = w / aspect;
       if (h > IMAGE_DEFAULT_DISPLAY) { h = IMAGE_DEFAULT_DISPLAY; w = h * aspect; }
       pushHistory(snapshot());
@@ -578,7 +625,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
         text: "",
         fill: "transparent",
         stroke: "transparent",
-        src: resized.src,
+        src: result.src,
       };
       setShapes((ss) => [...ss, s]);
       setSelectedId(s.id);
@@ -1322,28 +1369,62 @@ const ShapeNode = memo(function ShapeNode({
       />
     );
   } else if (shape.kind === "image") {
+    const cornerRadius = Math.min(shape.w, shape.h) * 0.08;
     geometry = (
       <g>
-        {shape.src && (
-          <image
-            href={shape.src}
-            x={shape.x} y={shape.y} width={shape.w} height={shape.h}
-            preserveAspectRatio="xMidYMid meet"
+        <foreignObject
+          x={shape.x} y={shape.y} width={shape.w} height={shape.h}
+        >
+          <div
             onPointerDown={handlePointerDown}
             onDoubleClick={handleDoubleClick}
-            style={styleProps}
-          />
-        )}
+            style={{
+              width: "100%",
+              height: "100%",
+              borderRadius: "8%",
+              overflow: "hidden",
+              background: "#e2e8f0",
+              boxSizing: "border-box",
+              cursor: "move",
+              touchAction: "none",
+            }}
+          >
+            {shape.src ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={shape.src}
+                alt=""
+                draggable={false}
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "cover",
+                  display: "block",
+                  userSelect: "none",
+                  pointerEvents: "none",
+                }}
+              />
+            ) : (
+              <div style={{
+                width: "100%",
+                height: "100%",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "#94a3b8",
+                fontSize: 14,
+              }}>image</div>
+            )}
+          </div>
+        </foreignObject>
         <rect
           x={shape.x} y={shape.y} width={shape.w} height={shape.h}
-          rx={6} ry={6}
-          fill={shape.src ? "transparent" : "#f1f5f9"}
+          rx={cornerRadius} ry={cornerRadius}
+          fill="none"
           stroke={selected || connectSource || connectTarget ? strokeColor : "transparent"}
           strokeWidth={selected || connectSource || connectTarget ? 2.5 : 0}
           vectorEffect="non-scaling-stroke"
-          onPointerDown={shape.src ? undefined : handlePointerDown}
-          onDoubleClick={shape.src ? undefined : handleDoubleClick}
-          style={shape.src ? { pointerEvents: "none" as const } : styleProps}
+          pointerEvents="none"
         />
       </g>
     );
@@ -1427,6 +1508,7 @@ const ShapeNode = memo(function ShapeNode({
               maxWidth: "100%",
               boxDecorationBreak: "clone",
               WebkitBoxDecorationBreak: "clone",
+              whiteSpace: "pre-wrap",
             }}>
               {shape.text}
             </span>
@@ -1614,11 +1696,9 @@ function TextEditOverlay({
           document.execCommand("insertText", false, text);
         }}
         onKeyDown={(e) => {
+          // Enter always inserts a newline (default contentEditable behavior).
+          // Esc commits. Tap outside also commits via the canvas pointerdown.
           if (e.key === "Escape") {
-            e.preventDefault();
-            onDone();
-          } else if (e.key === "Enter" && !e.shiftKey && !shape.bullet) {
-            // For bullet shapes, allow Enter to add a new line.
             e.preventDefault();
             onDone();
           }
