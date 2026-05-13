@@ -51,6 +51,10 @@ If you find yourself transcribing the speaker's words verbatim into labels, you'
 
 ## 3. Schema (exact)
 
+The import accepts **either** of two shapes. Pick whichever fits the request.
+
+### 3a. Single tree (default)
+
 ```ts
 type Node = {
   label: string;                                       // required, non-empty
@@ -59,6 +63,37 @@ type Node = {
   children?: Node[];                                   // optional sub-nodes
 };
 ```
+
+Use this when the whole topic is one connected hierarchy — every node hangs off the root.
+
+### 3b. Sections (multi-block boards) — preferred for video scripts
+
+```ts
+type Doc = {
+  sections: Section[];
+};
+
+type Section = {
+  title?: string;                          // optional small header above
+  layout?: "tree" | "compare" | "row";     // defaults to "tree"
+  nodes: Node[];                           // see Node above
+};
+```
+
+A section is an **independent cluster** on the board. Sections are stacked vertically with breathing room; **no edges connect across sections**. Use sections when the deliverable is a *script* or *deck* — different beats want different shapes:
+
+| `layout` | What it produces | Use for |
+|----------|------------------|---------|
+| `"tree"` (default) | One root + children, edges connecting parent→child. `nodes[0]` is the root. | A normal mindmap section. The default unless another layout fits better. |
+| `"compare"` | Two (or more) sub-trees side-by-side with a wide gap. Each root gets its own theme color. No edges between them. | A/B comparisons. "Person who does X" vs "Person who doesn't." Pros vs cons. Before vs after. |
+| `"row"` | Multiple sub-trees side-by-side with a smaller gap. Each gets its own theme color. No edges between them. | A row of parallel items the viewer should see together: three tactics, four examples, five questions. |
+
+Section behavior:
+- A section with `layout: "tree"` uses `nodes[0]` as the root and ignores the rest. Don't put unrelated content under one tree section.
+- A `"compare"` section reads best with **exactly 2** nodes. Three works; one defeats the purpose.
+- A `"row"` section is great for 2–6 nodes. More than 6 = use a tree instead.
+- The optional `title` renders as a small centered heading above the section.
+- Sections are NOT connected to each other. If two ideas need an edge between them, put them in the same section.
 
 - `label` — required. App trims to 200 chars; aim for ≤ 6 words wherever possible.
 - `style` — optional. Defaults applied by depth if you omit: root → `h1`, level-1 → `h2`, deeper → `body`. **You can omit `style` entirely for most mindmaps** and rely on defaults.
@@ -155,6 +190,26 @@ Branches are exactly these five, in this order, each `style: "h2"`. No sixth bra
 - The numbered or sequential thoughts in the middle → Body sub-sections, one `h3` each.
 - The "the lesson" / "the kicker" they say toward the end → Payoff.
 - Add a generic CTA if not specified.
+
+**Use sections, not one tree, when the script has visually different beats:**
+
+A long script almost never fits cleanly into a single tree. Reach for the sections schema (§3b) and pick a layout per beat. A common pattern:
+
+```json
+{
+  "sections": [
+    { "title": "Hook: A vs B", "layout": "compare", "nodes": [ /* two short trees: the contrast */ ] },
+    { "title": "The mechanism", "layout": "tree", "nodes": [ /* one h1 root with branches */ ] },
+    { "title": "Try this week", "layout": "row", "nodes": [ /* 3-5 bullet roots, no children */ ] }
+  ]
+}
+```
+
+- Hook beat → `"compare"` works when the hook is "person who does X vs person who doesn't".
+- Body / mechanism beat → `"tree"` for the connected breakdown.
+- Steps / takeaways beat → `"row"` for a row of independent things the viewer should remember.
+
+Don't force every beat into one tree just because it's the default. If two ideas in your script aren't actually causally connected, they shouldn't be in the same tree.
 
 ## 6. Quality rules
 

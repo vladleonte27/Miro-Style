@@ -11,7 +11,7 @@ import {
 } from "@/lib/storage";
 import type { Anchor, Board, Edge, Shape, ShapeKind, TextAlign } from "@/lib/types";
 import { newId } from "@/lib/id";
-import { layoutMindmap, type MindmapNode } from "@/lib/mindmap";
+import { layoutImport, type MindmapDocument } from "@/lib/mindmap";
 import ImportDialog from "./ImportDialog";
 import VoiceCaptureDialog from "./VoiceCaptureDialog";
 import LinkDialog, { type LinkPreview } from "./LinkDialog";
@@ -286,6 +286,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
   const [, setHistoryVersion] = useState(0);
 
   const svgRef = useRef<SVGSVGElement | null>(null);
+  const canvasRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<Drag>({ kind: "none" });
   const pointersRef = useRef<Map<number, Pt>>(new Map());
   const shapesRef = useRef<Shape[]>([]);
@@ -387,19 +388,20 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     setHistoryVersion((v) => v + 1);
   }, [snapshot]);
 
-  // Wheel zoom
+  // Wheel zoom — attached to the canvas container so it fires no matter
+  // which child element is under the cursor (SVG, foreignObject HTML, link
+  // card thumbnail, floating inspector buttons, etc).
   useEffect(() => {
-    const svg = svgRef.current;
-    if (!svg) return;
+    const container = canvasRef.current;
+    if (!container) return;
     function onWheel(e: WheelEvent) {
       e.preventDefault();
-      const rect = svg!.getBoundingClientRect();
+      const svg = svgRef.current;
+      if (!svg) return;
+      const rect = svg.getBoundingClientRect();
       const sx = e.clientX - rect.left;
       const sy = e.clientY - rect.top;
       setViewport((v) => {
-        // Exponential factor so trackpads feel smooth and mouse wheels still
-        // produce a noticeable step. ctrlKey wheel (pinch on macOS trackpad)
-        // gets a slightly larger coefficient for the same delta.
         const k = e.ctrlKey ? 0.01 : 0.005;
         const factor = Math.exp(-e.deltaY * k);
         const scale = clamp(v.scale * factor, 0.1, 4);
@@ -408,8 +410,8 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
         return { scale, tx: sx - bx * scale, ty: sy - by * scale };
       });
     }
-    svg.addEventListener("wheel", onWheel, { passive: false });
-    return () => svg.removeEventListener("wheel", onWheel);
+    container.addEventListener("wheel", onWheel, { passive: false });
+    return () => container.removeEventListener("wheel", onWheel);
   }, []);
 
   // Pointer handlers (rAF coalesced)
@@ -1175,12 +1177,24 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     setViewport({ scale, tx: rect.width / 2 - cx * scale, ty: rect.height / 2 - cy * scale });
   }
 
-  function applyMindmap(root: MindmapNode) {
+  function applyMindmap(doc: MindmapDocument) {
     pushHistory(snapshot());
-    const { shapes: ms, edges: me } = layoutMindmap(root);
-    setShapes((ss) => [...ss, ...ms]);
+    const { shapes: ms, edges: me } = layoutImport(doc);
+    if (ms.length === 0) return;
+    // Place the imported document near the current viewport center.
+    const rect = svgRef.current!.getBoundingClientRect();
+    const cx = (rect.width / 2 - viewport.tx) / viewport.scale;
+    const cy = (rect.height / 2 - viewport.ty) / viewport.scale;
+    const minX = Math.min(...ms.map((s) => s.x));
+    const maxX = Math.max(...ms.map((s) => s.x + s.w));
+    const minY = Math.min(...ms.map((s) => s.y));
+    const maxY = Math.max(...ms.map((s) => s.y + s.h));
+    const dx = cx - (minX + maxX) / 2;
+    const dy = cy - (minY + maxY) / 2;
+    const offset = ms.map((s) => ({ ...s, x: s.x + dx, y: s.y + dy }));
+    setShapes((ss) => [...ss, ...offset]);
     setEdges((es) => [...es, ...me]);
-    requestAnimationFrame(() => autoFitTo(ms));
+    requestAnimationFrame(() => autoFitTo(offset));
   }
 
   function onDeleteBoard() {
@@ -1303,10 +1317,9 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       </header>
 
       <div
+        ref={canvasRef}
         className="relative flex-1 overflow-hidden canvas-bg"
         style={{
-          // Pan the dot grid in lockstep with the canvas viewport and scale
-          // its spacing with zoom so dots track board coordinates.
           backgroundSize: `${24 * viewport.scale}px ${24 * viewport.scale}px`,
           backgroundPosition: `${viewport.tx}px ${viewport.ty}px`,
         }}

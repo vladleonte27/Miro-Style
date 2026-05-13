@@ -1,13 +1,13 @@
 "use client";
 
 import { useState } from "react";
-import { sanitizeMindmap, type MindmapNode } from "@/lib/mindmap";
+import { sanitizeImport, type MindmapDocument } from "@/lib/mindmap";
 import { Icon } from "./icons";
 
 interface Props {
   open: boolean;
   onClose: () => void;
-  onImport: (root: MindmapNode) => void;
+  onImport: (doc: MindmapDocument) => void;
 }
 
 function extractJson(raw: string): unknown | null {
@@ -49,12 +49,12 @@ export default function ImportDialog({ open, onClose, onImport }: Props) {
 
   function submit() {
     const parsed = extractJson(text);
-    const mindmap = sanitizeMindmap(parsed);
-    if (!mindmap) {
-      setError("That doesn't look like a valid mindmap JSON. Need { \"label\": …, \"children\": […] }.");
+    const doc = sanitizeImport(parsed);
+    if (!doc) {
+      setError("That doesn't look like a valid mindmap JSON. Need { \"label\": …, \"children\": […] } or { \"sections\": [ … ] }.");
       return;
     }
-    onImport(mindmap);
+    onImport(doc);
     setText("");
     setError(null);
     onClose();
