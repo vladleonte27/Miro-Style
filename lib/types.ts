@@ -10,6 +10,10 @@ export interface Shape {
   text: string;
   fill: string;
   stroke: string;
+  fontSize?: number;
+  bold?: boolean;
+  italic?: boolean;
+  highlight?: boolean;
 }
 
 export interface Edge {

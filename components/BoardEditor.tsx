@@ -22,22 +22,33 @@ type Drag =
   | { kind: "pan"; startSx: number; startSy: number; startTx: number; startTy: number }
   | { kind: "move"; id: string; startSx: number; startSy: number; origX: number; origY: number; scale: number; moved: boolean }
   | { kind: "resize"; id: string; corner: Corner; orig: Shape; startSx: number; startSy: number; scale: number }
-  | { kind: "pinch"; initialDist: number; initialScale: number; initialTx: number; initialTy: number; centerSx: number; centerSy: number };
+  | { kind: "pinch"; initialDist: number; initialScale: number; initialTx: number; initialTy: number; centerSx: number; centerSy: number }
+  | { kind: "connecting"; fromId: string };
 
-const DEFAULTS: Record<ShapeKind, Pick<Shape, "w" | "h" | "fill" | "stroke">> = {
-  rect: { w: 160, h: 96, fill: "#fef3c7", stroke: "#1f2937" },
-  ellipse: { w: 160, h: 96, fill: "#dbeafe", stroke: "#1f2937" },
-  diamond: { w: 144, h: 124, fill: "#dcfce7", stroke: "#1f2937" },
-  text: { w: 220, h: 44, fill: "transparent", stroke: "transparent" },
+const DEFAULTS: Record<ShapeKind, Pick<Shape, "w" | "h" | "fill" | "stroke" | "fontSize">> = {
+  rect: { w: 160, h: 96, fill: "#fef3c7", stroke: "#1f2937", fontSize: 14 },
+  ellipse: { w: 160, h: 96, fill: "#dbeafe", stroke: "#1f2937", fontSize: 14 },
+  diamond: { w: 144, h: 124, fill: "#dcfce7", stroke: "#1f2937", fontSize: 14 },
+  text: { w: 220, h: 44, fill: "transparent", stroke: "transparent", fontSize: 18 },
 };
 
 const SWATCHES = ["#fef3c7", "#dbeafe", "#dcfce7", "#fbcfe8", "#ddd6fe", "#fed7aa", "#fecaca", "#ffffff"];
+const FONT_MIN = 10;
+const FONT_MAX = 72;
+const FONT_STEP = 2;
+const HIGHLIGHT_COLOR = "#fde047";
 
 function clamp(v: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, v));
 }
 function shapeCenter(s: Shape) {
   return { x: s.x + s.w / 2, y: s.y + s.h / 2 };
+}
+function effFontSize(s: Shape): number {
+  return s.fontSize ?? (s.kind === "text" ? 18 : 14);
+}
+function pointInShape(s: Shape, x: number, y: number): boolean {
+  return x >= s.x && x <= s.x + s.w && y >= s.y && y <= s.y + s.h;
 }
 
 export default function BoardEditor({ boardId }: { boardId: string }) {
@@ -54,10 +65,25 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [name, setName] = useState("");
+  const [connectPreview, setConnectPreview] = useState<{
+    fromId: string;
+    toX: number;
+    toY: number;
+    targetId: string | null;
+  } | null>(null);
 
   const svgRef = useRef<SVGSVGElement | null>(null);
   const dragRef = useRef<Drag>({ kind: "none" });
   const pointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const shapesRef = useRef<Shape[]>([]);
+  const viewportRef = useRef(viewport);
+
+  useEffect(() => {
+    shapesRef.current = shapes;
+  }, [shapes]);
+  useEffect(() => {
+    viewportRef.current = viewport;
+  }, [viewport]);
 
   // Load board
   useEffect(() => {
@@ -102,7 +128,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     return () => svg.removeEventListener("wheel", onWheel);
   }, []);
 
-  // Global pointer move/up for drags + pinch
+  // Global pointer move/up for drags + pinch + connecting
   useEffect(() => {
     function onMove(e: PointerEvent) {
       const d = dragRef.current;
@@ -126,6 +152,23 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
         const bx = (d.centerSx - d.initialTx) / d.initialScale;
         const by = (d.centerSy - d.initialTy) / d.initialScale;
         setViewport({ scale, tx: mx - bx * scale, ty: my - by * scale });
+        return;
+      }
+      if (d.kind === "connecting") {
+        const vp = viewportRef.current;
+        const bx = (sx - vp.tx) / vp.scale;
+        const by = (sy - vp.ty) / vp.scale;
+        let targetId: string | null = null;
+        const list = shapesRef.current;
+        for (let i = list.length - 1; i >= 0; i--) {
+          const s = list[i];
+          if (s.id === d.fromId) continue;
+          if (pointInShape(s, bx, by)) {
+            targetId = s.id;
+            break;
+          }
+        }
+        setConnectPreview({ fromId: d.fromId, toX: bx, toY: by, targetId });
         return;
       }
       if (d.kind === "pan") {
@@ -159,6 +202,21 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     function onEnd(e: PointerEvent) {
       pointersRef.current.delete(e.pointerId);
       const d = dragRef.current;
+      if (d.kind === "connecting") {
+        const preview = connectPreviewRef.current;
+        if (preview?.targetId) {
+          const fromId = d.fromId;
+          const toId = preview.targetId;
+          setEdges((es) =>
+            es.some((x) => x.from === fromId && x.to === toId)
+              ? es
+              : [...es, { id: newId("e_"), from: fromId, to: toId }],
+          );
+        }
+        setConnectPreview(null);
+        dragRef.current = { kind: "none" };
+        return;
+      }
       if (d.kind === "pinch" && pointersRef.current.size < 2) {
         dragRef.current = { kind: "none" };
       } else if (pointersRef.current.size === 0) {
@@ -175,7 +233,13 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     };
   }, []);
 
-  // Keyboard (desktop only — phones use inspector buttons)
+  // Keep latest connectPreview accessible in onEnd
+  const connectPreviewRef = useRef<typeof connectPreview>(null);
+  useEffect(() => {
+    connectPreviewRef.current = connectPreview;
+  }, [connectPreview]);
+
+  // Keyboard (desktop)
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (editingId) return;
@@ -199,6 +263,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     setShapes((s) => s.filter((x) => x.id !== id));
     setEdges((es) => es.filter((x) => x.from !== id && x.to !== id));
     if (selectedId === id) setSelectedId(null);
+    if (editingId === id) setEditingId(null);
   }
 
   function trySwitchToPinch(): boolean {
@@ -217,6 +282,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       centerSx,
       centerSy,
     };
+    setConnectPreview(null);
     return true;
   }
 
@@ -235,15 +301,20 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       text: kind === "text" ? "Text" : "",
       fill: d.fill,
       stroke: d.stroke,
+      fontSize: d.fontSize,
     };
     setShapes((ss) => [...ss, s]);
     setSelectedId(s.id);
     setAddOpen(false);
   }
 
+  function maybeCloseEdit() {
+    if (editingId) setEditingId(null);
+  }
+
   function onShapePointerDown(e: React.PointerEvent, s: Shape) {
     e.stopPropagation();
-    if (editingId) return;
+    maybeCloseEdit();
     pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (trySwitchToPinch()) return;
 
@@ -276,7 +347,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
   }
 
   function onCanvasPointerDown(e: React.PointerEvent) {
-    if (editingId) return;
+    maybeCloseEdit();
     pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (trySwitchToPinch()) return;
 
@@ -314,8 +385,23 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     };
   }
 
+  function onDotPointerDown(e: React.PointerEvent, s: Shape) {
+    e.stopPropagation();
+    pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (trySwitchToPinch()) return;
+    dragRef.current = { kind: "connecting", fromId: s.id };
+    const c = shapeCenter(s);
+    setConnectPreview({ fromId: s.id, toX: c.x, toY: c.y, targetId: null });
+  }
+
   function updateShape(id: string, patch: Partial<Shape>) {
     setShapes((ss) => ss.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+  }
+
+  function bumpFontSize(id: string, delta: number) {
+    setShapes((ss) =>
+      ss.map((s) => (s.id === id ? { ...s, fontSize: clamp(effFontSize(s) + delta, FONT_MIN, FONT_MAX) } : s)),
+    );
   }
 
   function applyMindmap(root: MindmapNode) {
@@ -353,10 +439,10 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
 
   const selected = shapes.find((s) => s.id === selectedId) ?? null;
   const editing = shapes.find((s) => s.id === editingId) ?? null;
+  const connectingFrom = connectPreview ? shapes.find((s) => s.id === connectPreview.fromId) ?? null : null;
 
   return (
     <div className="flex flex-col" style={{ height: "100dvh" }}>
-      {/* Header */}
       <header
         className="flex items-center gap-2 px-2 sm:px-4 py-2 border-b bg-white"
         style={{ paddingTop: "max(8px, env(safe-area-inset-top))" }}
@@ -395,7 +481,6 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
         </div>
       </header>
 
-      {/* Canvas */}
       <div className="relative flex-1 overflow-hidden canvas-bg">
         <svg
           ref={svgRef}
@@ -423,12 +508,28 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
               );
             })}
 
+            {/* Live connection preview line */}
+            {connectPreview && connectingFrom && (
+              <line
+                x1={shapeCenter(connectingFrom).x}
+                y1={shapeCenter(connectingFrom).y}
+                x2={connectPreview.toX}
+                y2={connectPreview.toY}
+                stroke="#6366f1"
+                strokeWidth={2.5}
+                strokeDasharray="6 4"
+                vectorEffect="non-scaling-stroke"
+                pointerEvents="none"
+              />
+            )}
+
             {shapes.map((s) => (
               <ShapeNode
                 key={s.id}
                 shape={s}
                 selected={s.id === selectedId}
-                connectSource={s.id === edgeFromId}
+                connectSource={s.id === edgeFromId || s.id === connectPreview?.fromId}
+                connectTarget={s.id === connectPreview?.targetId}
                 onPointerDown={(e) => onShapePointerDown(e, s)}
                 onDoubleClick={() => {
                   setEditingId(s.id);
@@ -438,16 +539,22 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
             ))}
 
             {selected && !editing && (
-              <ResizeHandles
-                shape={selected}
-                scale={viewport.scale}
-                onHandle={(corner, e) => onHandlePointerDown(e, selected, corner)}
-              />
+              <>
+                <ResizeHandles
+                  shape={selected}
+                  scale={viewport.scale}
+                  onHandle={(corner, e) => onHandlePointerDown(e, selected, corner)}
+                />
+                <ConnectionDots
+                  shape={selected}
+                  scale={viewport.scale}
+                  onStart={(e) => onDotPointerDown(e, selected)}
+                />
+              </>
             )}
           </g>
         </svg>
 
-        {/* Text edit overlay */}
         {editing && (
           <>
             <TextEditOverlay
@@ -456,27 +563,26 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
               onChange={(text) => updateShape(editing.id, { text })}
               onDone={() => setEditingId(null)}
             />
-            <button
-              onClick={() => setEditingId(null)}
-              className="absolute top-2 left-1/2 -translate-x-1/2 bg-slate-900 text-white px-4 py-2 rounded-full shadow-lg z-30 text-sm font-medium"
-            >
-              Done ✓
-            </button>
+            <EditingTopBar
+              shape={editing}
+              onToggle={(patch) => updateShape(editing.id, patch)}
+              onBump={(delta) => bumpFontSize(editing.id, delta)}
+              onDone={() => setEditingId(null)}
+            />
           </>
         )}
 
-        {/* Mode hint */}
         {mode === "connect" && (
           <div className="absolute top-3 left-1/2 -translate-x-1/2 bg-slate-900 text-white text-xs px-3 py-2 rounded-full shadow z-10 pointer-events-none">
             {edgeFromId ? "Tap a target shape" : "Tap source, then target"}
           </div>
         )}
 
-        {/* Bottom UI: inspector OR toolbar */}
         {selected && !editing ? (
           <Inspector
             shape={selected}
             onChange={(patch) => updateShape(selected.id, patch)}
+            onBump={(delta) => bumpFontSize(selected.id, delta)}
             onDelete={() => deleteShape(selected.id)}
             onEditText={() => setEditingId(selected.id)}
           />
@@ -509,17 +615,25 @@ function ShapeNode({
   shape,
   selected,
   connectSource,
+  connectTarget,
   onPointerDown,
   onDoubleClick,
 }: {
   shape: Shape;
   selected: boolean;
   connectSource: boolean;
+  connectTarget: boolean;
   onPointerDown: (e: React.PointerEvent) => void;
   onDoubleClick: () => void;
 }) {
-  const strokeColor = connectSource ? "#6366f1" : selected ? "#0ea5e9" : shape.stroke;
-  const strokeW = selected || connectSource ? 2.5 : 1.5;
+  const strokeColor = connectTarget
+    ? "#22c55e"
+    : connectSource
+      ? "#6366f1"
+      : selected
+        ? "#0ea5e9"
+        : shape.stroke;
+  const strokeW = selected || connectSource || connectTarget ? 2.5 : 1.5;
   const handlers = {
     onPointerDown,
     onDoubleClick,
@@ -530,31 +644,19 @@ function ShapeNode({
   if (shape.kind === "rect") {
     geometry = (
       <rect
-        x={shape.x}
-        y={shape.y}
-        width={shape.w}
-        height={shape.h}
-        rx={10}
-        ry={10}
-        fill={shape.fill}
-        stroke={strokeColor}
-        strokeWidth={strokeW}
-        vectorEffect="non-scaling-stroke"
-        {...handlers}
+        x={shape.x} y={shape.y} width={shape.w} height={shape.h}
+        rx={10} ry={10}
+        fill={shape.fill} stroke={strokeColor} strokeWidth={strokeW}
+        vectorEffect="non-scaling-stroke" {...handlers}
       />
     );
   } else if (shape.kind === "ellipse") {
     geometry = (
       <ellipse
-        cx={shape.x + shape.w / 2}
-        cy={shape.y + shape.h / 2}
-        rx={shape.w / 2}
-        ry={shape.h / 2}
-        fill={shape.fill}
-        stroke={strokeColor}
-        strokeWidth={strokeW}
-        vectorEffect="non-scaling-stroke"
-        {...handlers}
+        cx={shape.x + shape.w / 2} cy={shape.y + shape.h / 2}
+        rx={shape.w / 2} ry={shape.h / 2}
+        fill={shape.fill} stroke={strokeColor} strokeWidth={strokeW}
+        vectorEffect="non-scaling-stroke" {...handlers}
       />
     );
   } else if (shape.kind === "diamond") {
@@ -567,26 +669,19 @@ function ShapeNode({
     geometry = (
       <polygon
         points={pts}
-        fill={shape.fill}
-        stroke={strokeColor}
-        strokeWidth={strokeW}
-        vectorEffect="non-scaling-stroke"
-        {...handlers}
+        fill={shape.fill} stroke={strokeColor} strokeWidth={strokeW}
+        vectorEffect="non-scaling-stroke" {...handlers}
       />
     );
   } else {
     geometry = (
       <rect
-        x={shape.x}
-        y={shape.y}
-        width={shape.w}
-        height={shape.h}
+        x={shape.x} y={shape.y} width={shape.w} height={shape.h}
         fill="transparent"
-        stroke={selected || connectSource ? strokeColor : "transparent"}
+        stroke={selected || connectSource || connectTarget ? strokeColor : "transparent"}
         strokeDasharray={selected ? "4 4" : undefined}
         strokeWidth={1.5}
-        vectorEffect="non-scaling-stroke"
-        {...handlers}
+        vectorEffect="non-scaling-stroke" {...handlers}
       />
     );
   }
@@ -595,10 +690,7 @@ function ShapeNode({
     <g>
       {geometry}
       <foreignObject
-        x={shape.x}
-        y={shape.y}
-        width={shape.w}
-        height={shape.h}
+        x={shape.x} y={shape.y} width={shape.w} height={shape.h}
         pointerEvents="none"
       >
         <div
@@ -610,16 +702,25 @@ function ShapeNode({
             justifyContent: "center",
             padding: 8,
             boxSizing: "border-box",
-            fontSize: shape.kind === "text" ? 18 : 14,
-            fontWeight: shape.kind === "text" ? 500 : 400,
             color: "#0f172a",
             textAlign: "center",
             wordBreak: "break-word",
             lineHeight: 1.25,
             userSelect: "none",
+            fontSize: effFontSize(shape),
+            fontWeight: shape.bold ? 700 : 400,
+            fontStyle: shape.italic ? "italic" : "normal",
           }}
         >
-          {shape.text}
+          <span
+            style={{
+              backgroundColor: shape.highlight ? HIGHLIGHT_COLOR : "transparent",
+              padding: shape.highlight ? "2px 6px" : 0,
+              borderRadius: 4,
+            }}
+          >
+            {shape.text}
+          </span>
         </div>
       </foreignObject>
     </g>
@@ -648,22 +749,55 @@ function ResizeHandles({
       {corners.map((c) => (
         <g key={c.key}>
           <rect
-            x={c.x - hit / 2}
-            y={c.y - hit / 2}
-            width={hit}
-            height={hit}
+            x={c.x - hit / 2} y={c.y - hit / 2}
+            width={hit} height={hit}
             fill="transparent"
             style={{ cursor: c.cursor, touchAction: "none" }}
             onPointerDown={(e) => onHandle(c.key, e)}
           />
           <rect
-            x={c.x - vis / 2}
-            y={c.y - vis / 2}
-            width={vis}
-            height={vis}
-            fill="#ffffff"
-            stroke="#0ea5e9"
-            strokeWidth={1.5}
+            x={c.x - vis / 2} y={c.y - vis / 2}
+            width={vis} height={vis}
+            fill="#ffffff" stroke="#0ea5e9" strokeWidth={1.5}
+            vectorEffect="non-scaling-stroke"
+            pointerEvents="none"
+          />
+        </g>
+      ))}
+    </>
+  );
+}
+
+function ConnectionDots({
+  shape,
+  scale,
+  onStart,
+}: {
+  shape: Shape;
+  scale: number;
+  onStart: (e: React.PointerEvent) => void;
+}) {
+  const vis = 12 / scale;
+  const hit = 32 / scale;
+  const dots = [
+    { x: shape.x + shape.w / 2, y: shape.y },
+    { x: shape.x + shape.w, y: shape.y + shape.h / 2 },
+    { x: shape.x + shape.w / 2, y: shape.y + shape.h },
+    { x: shape.x, y: shape.y + shape.h / 2 },
+  ];
+  return (
+    <>
+      {dots.map((d, i) => (
+        <g key={i}>
+          <circle
+            cx={d.x} cy={d.y} r={hit / 2}
+            fill="transparent"
+            style={{ cursor: "crosshair", touchAction: "none" }}
+            onPointerDown={onStart}
+          />
+          <circle
+            cx={d.x} cy={d.y} r={vis / 2}
+            fill="#ffffff" stroke="#6366f1" strokeWidth={2}
             vectorEffect="non-scaling-stroke"
             pointerEvents="none"
           />
@@ -688,18 +822,15 @@ function TextEditOverlay({
   const top = shape.y * viewport.scale + viewport.ty;
   const width = shape.w * viewport.scale;
   const height = shape.h * viewport.scale;
+  const fontPx = effFontSize(shape) * viewport.scale;
 
   return (
     <textarea
       autoFocus
       value={shape.text}
       onChange={(e) => onChange(e.target.value)}
-      onBlur={onDone}
       onKeyDown={(e) => {
-        if (e.key === "Escape") {
-          e.preventDefault();
-          onDone();
-        } else if (e.key === "Enter" && !e.shiftKey) {
+        if (e.key === "Escape" || (e.key === "Enter" && !e.shiftKey)) {
           e.preventDefault();
           onDone();
         }
@@ -713,17 +844,102 @@ function TextEditOverlay({
         padding: 8,
         boxSizing: "border-box",
         textAlign: "center",
-        fontSize: Math.max(14, (shape.kind === "text" ? 18 : 14) * viewport.scale),
-        fontWeight: shape.kind === "text" ? 500 : 400,
+        fontSize: Math.max(14, fontPx),
+        fontWeight: shape.bold ? 700 : 400,
+        fontStyle: shape.italic ? "italic" : "normal",
         lineHeight: 1.25,
         border: "2px solid #0ea5e9",
         borderRadius: 8,
-        background: "white",
+        background: shape.highlight ? HIGHLIGHT_COLOR : "white",
         resize: "none",
         outline: "none",
         zIndex: 20,
       }}
     />
+  );
+}
+
+function FmtBtn({
+  active,
+  label,
+  bold,
+  italic,
+  onActivate,
+  ariaLabel,
+}: {
+  active: boolean;
+  label: string;
+  bold?: boolean;
+  italic?: boolean;
+  onActivate: () => void;
+  ariaLabel: string;
+}) {
+  return (
+    <button
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={onActivate}
+      aria-pressed={active}
+      aria-label={ariaLabel}
+      className={`h-11 min-w-11 px-2 rounded-xl text-sm ${active ? "bg-slate-900 text-white" : "hover:bg-slate-100"}`}
+      style={{ fontWeight: bold ? 700 : undefined, fontStyle: italic ? "italic" : undefined }}
+    >
+      {label}
+    </button>
+  );
+}
+
+function EditingTopBar({
+  shape,
+  onToggle,
+  onBump,
+  onDone,
+}: {
+  shape: Shape;
+  onToggle: (patch: Partial<Shape>) => void;
+  onBump: (delta: number) => void;
+  onDone: () => void;
+}) {
+  return (
+    <div
+      className="absolute left-0 right-0 px-2 z-40 pointer-events-none"
+      style={{ top: "max(8px, env(safe-area-inset-top))" }}
+    >
+      <div className="flex justify-center">
+        <div className="pointer-events-auto bg-white border shadow-lg rounded-2xl p-1.5 flex items-center gap-1">
+          <FmtBtn label="B" bold active={!!shape.bold} onActivate={() => onToggle({ bold: !shape.bold })} ariaLabel="Bold" />
+          <FmtBtn label="I" italic active={!!shape.italic} onActivate={() => onToggle({ italic: !shape.italic })} ariaLabel="Italic" />
+          <FmtBtn label="H" active={!!shape.highlight} onActivate={() => onToggle({ highlight: !shape.highlight })} ariaLabel="Highlight" />
+          <div className="w-px h-6 bg-slate-200 mx-0.5" />
+          <button
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => onBump(-FONT_STEP)}
+            className="h-11 min-w-11 px-2 rounded-xl hover:bg-slate-100 text-sm"
+            aria-label="Smaller text"
+          >
+            A−
+          </button>
+          <div className="px-1 text-xs text-slate-500 tabular-nums w-8 text-center">
+            {effFontSize(shape)}
+          </div>
+          <button
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => onBump(FONT_STEP)}
+            className="h-11 min-w-11 px-2 rounded-xl hover:bg-slate-100 text-sm"
+            aria-label="Larger text"
+          >
+            A+
+          </button>
+          <div className="w-px h-6 bg-slate-200 mx-0.5" />
+          <button
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={onDone}
+            className="h-11 px-3 rounded-xl bg-slate-900 text-white text-sm font-medium"
+          >
+            Done ✓
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -800,11 +1016,13 @@ function BottomToolbar({
 function Inspector({
   shape,
   onChange,
+  onBump,
   onDelete,
   onEditText,
 }: {
   shape: Shape;
   onChange: (p: Partial<Shape>) => void;
+  onBump: (delta: number) => void;
   onDelete: () => void;
   onEditText: () => void;
 }) {
@@ -814,8 +1032,48 @@ function Inspector({
       style={{ paddingBottom: "max(8px, env(safe-area-inset-bottom))" }}
     >
       <div className="flex justify-center">
-        <div className="pointer-events-auto bg-white border shadow-lg rounded-2xl p-3 w-full max-w-md flex items-center gap-3">
-          <div className="flex flex-wrap gap-1.5 flex-1">
+        <div className="pointer-events-auto bg-white border shadow-lg rounded-2xl p-2 w-full max-w-md flex flex-col gap-2">
+          {/* Row 1: formatting */}
+          <div className="flex items-center gap-1">
+            <FmtBtn label="B" bold active={!!shape.bold} onActivate={() => onChange({ bold: !shape.bold })} ariaLabel="Bold" />
+            <FmtBtn label="I" italic active={!!shape.italic} onActivate={() => onChange({ italic: !shape.italic })} ariaLabel="Italic" />
+            <FmtBtn label="H" active={!!shape.highlight} onActivate={() => onChange({ highlight: !shape.highlight })} ariaLabel="Highlight" />
+            <div className="w-px h-6 bg-slate-200 mx-0.5" />
+            <button
+              onClick={() => onBump(-FONT_STEP)}
+              className="h-11 min-w-11 px-2 rounded-xl hover:bg-slate-100 text-sm"
+              aria-label="Smaller text"
+            >
+              A−
+            </button>
+            <div className="px-1 text-xs text-slate-500 tabular-nums w-8 text-center">
+              {effFontSize(shape)}
+            </div>
+            <button
+              onClick={() => onBump(FONT_STEP)}
+              className="h-11 min-w-11 px-2 rounded-xl hover:bg-slate-100 text-sm"
+              aria-label="Larger text"
+            >
+              A+
+            </button>
+            <div className="flex-1" />
+            <button
+              onClick={onEditText}
+              className="h-11 min-w-11 px-3 rounded-xl hover:bg-slate-100 text-sm"
+              aria-label="Edit text"
+            >
+              ✎
+            </button>
+            <button
+              onClick={onDelete}
+              className="h-11 min-w-11 px-3 rounded-xl hover:bg-red-50 text-red-600 text-sm"
+              aria-label="Delete shape"
+            >
+              🗑
+            </button>
+          </div>
+          {/* Row 2: colors */}
+          <div className="flex flex-wrap gap-1.5 px-1">
             {SWATCHES.map((c) => (
               <button
                 key={c}
@@ -826,20 +1084,6 @@ function Inspector({
               />
             ))}
           </div>
-          <button
-            onClick={onEditText}
-            className="px-3 h-11 rounded-xl hover:bg-slate-100 text-sm"
-            aria-label="Edit text"
-          >
-            ✎
-          </button>
-          <button
-            onClick={onDelete}
-            className="px-3 h-11 rounded-xl hover:bg-red-50 text-red-600 text-sm"
-            aria-label="Delete shape"
-          >
-            🗑
-          </button>
         </div>
       </div>
     </div>

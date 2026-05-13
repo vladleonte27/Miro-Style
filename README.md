@@ -38,12 +38,13 @@ npm run dev
 - **Pan**: one-finger drag on empty space.
 - **Zoom**: pinch (or scroll wheel on desktop).
 - **Add shape**: bottom toolbar → **+ Shape** → pick a kind.
-- **Select**: tap a shape.
+- **Select**: tap a shape. You'll see resize handles at the corners (sky-blue) and **4 indigo dots** at the edge midpoints.
 - **Move**: drag selected shape.
 - **Resize**: drag a corner handle (large hit areas for thumbs).
-- **Edit text**: double-tap, or select → **✎** in the inspector. Press **Done ✓** when finished (Enter also commits).
-- **Connect shapes**: bottom toolbar → **↔ Connect** → tap source, tap target.
-- **Recolor / Delete**: select a shape → inspector pops up at the bottom with swatches + ✎ + 🗑.
+- **Connect (fast)**: drag from one of the 4 indigo dots onto another shape — release on the target (it'll glow green) to wire it up. A dashed indigo line follows your finger so you see what's about to happen.
+- **Connect (tap-tap)**: bottom toolbar → **↔ Connect** → tap source, tap target. Useful for shapes far apart.
+- **Edit text**: double-tap a shape, or select → tap **✎**. While editing you get a floating top bar with **B / I / H / A− / A+ / Done**. Changes preview live in the textarea and on the shape underneath.
+- **Format without editing**: with a shape selected, the inspector at the bottom gives you **B / I / H / A− / A+**, color swatches, **✎**, **🗑** — all in one row + a swatches row.
 - **Delete board**: top-right **⋮** menu.
 
 ### Mindmap import (the magic part)
