@@ -1,5 +1,6 @@
-export type ShapeKind = "rect" | "ellipse" | "diamond" | "text";
+export type ShapeKind = "rect" | "ellipse" | "diamond" | "text" | "image";
 export type Anchor = "top" | "right" | "bottom" | "left";
+export type TextAlign = "left" | "center" | "right";
 
 export interface Shape {
   id: string;
@@ -16,6 +17,9 @@ export interface Shape {
   italic?: boolean;
   highlight?: boolean;
   highlightColor?: string;
+  textAlign?: TextAlign;
+  bullet?: boolean;
+  src?: string;
 }
 
 export interface Edge {

@@ -1,11 +1,12 @@
 "use client";
 
-import type { Anchor, Board, Edge, Shape, ShapeKind } from "./types";
+import type { Anchor, Board, Edge, Shape, ShapeKind, TextAlign } from "./types";
 import { newId } from "./id";
 
 const KEY = "miro-style:boards:v1";
-const VALID_KINDS: ShapeKind[] = ["rect", "ellipse", "diamond", "text"];
+const VALID_KINDS: ShapeKind[] = ["rect", "ellipse", "diamond", "text", "image"];
 const VALID_ANCHORS: Anchor[] = ["top", "right", "bottom", "left"];
+const VALID_ALIGNS: TextAlign[] = ["left", "center", "right"];
 
 function isNumber(n: unknown): n is number {
   return typeof n === "number" && Number.isFinite(n);
@@ -33,6 +34,12 @@ function sanitizeShape(raw: unknown): Shape | null {
     italic: typeof s.italic === "boolean" ? s.italic : undefined,
     highlight: typeof s.highlight === "boolean" ? s.highlight : undefined,
     highlightColor: typeof s.highlightColor === "string" ? s.highlightColor : undefined,
+    textAlign:
+      typeof s.textAlign === "string" && VALID_ALIGNS.includes(s.textAlign as TextAlign)
+        ? (s.textAlign as TextAlign)
+        : undefined,
+    bullet: typeof s.bullet === "boolean" ? s.bullet : undefined,
+    src: typeof s.src === "string" ? s.src : undefined,
   };
 }
 

@@ -9,7 +9,7 @@ import {
   renameBoard,
   saveBoard,
 } from "@/lib/storage";
-import type { Anchor, Board, Edge, Shape, ShapeKind } from "@/lib/types";
+import type { Anchor, Board, Edge, Shape, ShapeKind, TextAlign } from "@/lib/types";
 import { newId } from "@/lib/id";
 import { layoutMindmap, type MindmapNode } from "@/lib/mindmap";
 import ImportDialog from "./ImportDialog";
@@ -20,6 +20,7 @@ type Corner = "nw" | "ne" | "sw" | "se";
 type Pt = { x: number; y: number };
 type Viewport = { tx: number; ty: number; scale: number };
 type Snapshot = { shapes: Shape[]; edges: Edge[] };
+type TextStyleKey = "h1" | "h2" | "h3" | "body";
 
 type Drag =
   | { kind: "none" }
@@ -29,7 +30,7 @@ type Drag =
   | { kind: "pinch"; initialDist: number; initialScale: number; initialTx: number; initialTy: number; centerSx: number; centerSy: number }
   | { kind: "connecting"; fromId: string; fromAnchor: Anchor };
 
-const DEFAULTS: Record<ShapeKind, Pick<Shape, "w" | "h" | "fill" | "stroke" | "fontSize">> = {
+const DEFAULTS: Record<Exclude<ShapeKind, "image">, Pick<Shape, "w" | "h" | "fill" | "stroke" | "fontSize">> = {
   rect: { w: 160, h: 96, fill: "#fef3c7", stroke: "#1f2937", fontSize: 14 },
   ellipse: { w: 160, h: 96, fill: "#dbeafe", stroke: "#1f2937", fontSize: 14 },
   diamond: { w: 144, h: 124, fill: "#dcfce7", stroke: "#1f2937", fontSize: 14 },
@@ -45,6 +46,21 @@ const FONT_STEP = 2;
 const SNAP_PX = 6;
 const HISTORY_LIMIT = 50;
 const EDGE_HIT_WIDTH = 18;
+const IMAGE_MAX_DIM = 1024;
+const IMAGE_DEFAULT_DISPLAY = 360;
+
+const STYLE_PRESETS: Record<TextStyleKey, { fontSize: number; bold: boolean }> = {
+  h1: { fontSize: 22, bold: true },
+  h2: { fontSize: 18, bold: true },
+  h3: { fontSize: 16, bold: true },
+  body: { fontSize: 14, bold: false },
+};
+
+const JUSTIFY: Record<TextAlign, "flex-start" | "center" | "flex-end"> = {
+  left: "flex-start",
+  center: "center",
+  right: "flex-end",
+};
 
 // ---------- pure helpers ----------
 
@@ -56,6 +72,20 @@ function effFontSize(s: Shape): number {
 }
 function effHighlightColor(s: Shape): string {
   return s.highlightColor ?? DEFAULT_HIGHLIGHT;
+}
+function effTextAlign(s: Shape): TextAlign {
+  return s.textAlign ?? (s.bullet ? "left" : "center");
+}
+function detectTextStyle(s: Shape): TextStyleKey | null {
+  const fs = effFontSize(s);
+  if (s.bold) {
+    if (fs >= 22) return "h1";
+    if (fs >= 18) return "h2";
+    if (fs >= 16) return "h3";
+  } else if (fs <= 14) {
+    return "body";
+  }
+  return null;
 }
 function clipPathFor(kind: ShapeKind): string | undefined {
   if (kind === "ellipse") return "ellipse(50% 50% at 50% 50%)";
@@ -163,6 +193,45 @@ function computeSnap(
   return { x: x + snapDX, y: y + snapDY, guideX, guideY };
 }
 
+// ---------- image helpers ----------
+
+function readFileAsDataURL(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result as string);
+    r.onerror = () => reject(new Error("Failed to read file"));
+    r.readAsDataURL(file);
+  });
+}
+
+function resizeImage(dataUrl: string, maxDim: number): Promise<{ src: string; w: number; h: number }> {
+  return new Promise((resolve, reject) => {
+    const img = new window.Image();
+    img.onload = () => {
+      let w = img.width;
+      let h = img.height;
+      if (!w || !h) { resolve({ src: dataUrl, w: w || 200, h: h || 200 }); return; }
+      const ratio = w / h;
+      if (w > maxDim || h > maxDim) {
+        if (ratio >= 1) { w = maxDim; h = maxDim / ratio; }
+        else { h = maxDim; w = maxDim * ratio; }
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(w);
+      canvas.height = Math.round(h);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) { resolve({ src: dataUrl, w: Math.round(w), h: Math.round(h) }); return; }
+      ctx.drawImage(img, 0, 0, w, h);
+      const isPng = dataUrl.startsWith("data:image/png");
+      const mime = isPng ? "image/png" : "image/jpeg";
+      const out = isPng ? canvas.toDataURL(mime) : canvas.toDataURL(mime, 0.85);
+      resolve({ src: out, w: canvas.width, h: canvas.height });
+    };
+    img.onerror = () => reject(new Error("Failed to load image"));
+    img.src = dataUrl;
+  });
+}
+
 // ---------- main component ----------
 
 export default function BoardEditor({ boardId }: { boardId: string }) {
@@ -180,6 +249,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [name, setName] = useState("");
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [connectPreview, setConnectPreview] = useState<{
     fromId: string;
     fromAnchor: Anchor;
@@ -238,7 +308,6 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
   );
 
   const pushHistory = useCallback((snap: Snapshot) => {
-    // Skip if state is identical (no-op action).
     if (snap.shapes === shapesRef.current && snap.edges === edgesRef.current) return;
     historyRef.current.push(snap);
     if (historyRef.current.length > HISTORY_LIMIT) historyRef.current.shift();
@@ -247,7 +316,6 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
   }, []);
 
   const undo = useCallback(() => {
-    // Skip no-op history entries.
     let prev: Snapshot | undefined;
     while ((prev = historyRef.current.pop())) {
       if (prev.shapes !== shapesRef.current || prev.edges !== edgesRef.current) break;
@@ -490,6 +558,36 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     setSelectedId(copy.id);
   }, [pushHistory, snapshot]);
 
+  const addImageFromFile = useCallback(async (file: File, bx: number, by: number) => {
+    if (!file.type.startsWith("image/")) return;
+    try {
+      const original = await readFileAsDataURL(file);
+      const resized = await resizeImage(original, IMAGE_MAX_DIM);
+      const aspect = resized.w / resized.h;
+      let w = Math.min(resized.w, IMAGE_DEFAULT_DISPLAY);
+      let h = w / aspect;
+      if (h > IMAGE_DEFAULT_DISPLAY) { h = IMAGE_DEFAULT_DISPLAY; w = h * aspect; }
+      pushHistory(snapshot());
+      const s: Shape = {
+        id: newId("s_"),
+        kind: "image",
+        x: bx - w / 2,
+        y: by - h / 2,
+        w,
+        h,
+        text: "",
+        fill: "transparent",
+        stroke: "transparent",
+        src: resized.src,
+      };
+      setShapes((ss) => [...ss, s]);
+      setSelectedId(s.id);
+      setSelectedEdgeId(null);
+    } catch (err) {
+      console.error("Image load failed", err);
+    }
+  }, [pushHistory, snapshot]);
+
   // Keyboard
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -557,11 +655,31 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     return true;
   }
 
-  function addShape(kind: ShapeKind) {
-    pushHistory(snapshot());
+  function viewportCenter(): Pt {
     const rect = svgRef.current!.getBoundingClientRect();
-    const cx = (rect.width / 2 - viewport.tx) / viewport.scale;
-    const cy = (rect.height / 2 - viewport.ty) / viewport.scale;
+    return {
+      x: (rect.width / 2 - viewport.tx) / viewport.scale,
+      y: (rect.height / 2 - viewport.ty) / viewport.scale,
+    };
+  }
+
+  function addShape(kind: ShapeKind) {
+    if (kind === "image") {
+      setAddOpen(false);
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = "image/*";
+      input.onchange = () => {
+        const file = input.files?.[0];
+        if (!file) return;
+        const { x, y } = viewportCenter();
+        addImageFromFile(file, x, y);
+      };
+      input.click();
+      return;
+    }
+    pushHistory(snapshot());
+    const { x: cx, y: cy } = viewportCenter();
     const d = DEFAULTS[kind];
     const s: Shape = {
       id: newId("s_"),
@@ -627,6 +745,8 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
   }, [editingId, mode, edgeFromId, pushHistory, snapshot]);
 
   const onShapeDoubleClick = useCallback((id: string) => {
+    const s = shapesRef.current.find((sh) => sh.id === id);
+    if (!s || s.kind === "image") return; // images don't have editable text
     pushHistory(snapshot());
     setEditingId(id);
     setSelectedId(id);
@@ -710,6 +830,11 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     );
   }
 
+  function applyTextStyle(id: string, style: TextStyleKey, opts?: { history?: boolean }) {
+    const preset = STYLE_PRESETS[style];
+    updateShape(id, { fontSize: preset.fontSize, bold: preset.bold || undefined }, opts);
+  }
+
   function autoFitTo(ms: Shape[], padding = 60) {
     if (!ms.length) return;
     const minX = Math.min(...ms.map((s) => s.x));
@@ -743,7 +868,32 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
     }
   }
 
-  // Build a lookup map so edge rendering is O(edges) not O(edges*shapes).
+  // Drag-drop image onto canvas (desktop)
+  function onContainerDragOver(e: React.DragEvent) {
+    if (e.dataTransfer.types.includes("Files")) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+      if (!isDraggingFile) setIsDraggingFile(true);
+    }
+  }
+  function onContainerDragLeave(e: React.DragEvent) {
+    if (e.currentTarget === e.target) setIsDraggingFile(false);
+  }
+  function onContainerDrop(e: React.DragEvent) {
+    setIsDraggingFile(false);
+    const files = e.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+    const file = files[0];
+    if (!file.type.startsWith("image/")) return;
+    e.preventDefault();
+    const rect = svgRef.current!.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+    const bx = (sx - viewport.tx) / viewport.scale;
+    const by = (sy - viewport.ty) / viewport.scale;
+    addImageFromFile(file, bx, by);
+  }
+
   const shapesById = useMemo(() => {
     const m = new Map<string, Shape>();
     for (const s of shapes) m.set(s.id, s);
@@ -827,7 +977,12 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
         </div>
       </header>
 
-      <div className="relative flex-1 overflow-hidden canvas-bg">
+      <div
+        className="relative flex-1 overflow-hidden canvas-bg"
+        onDragOver={onContainerDragOver}
+        onDragLeave={onContainerDragLeave}
+        onDrop={onContainerDrop}
+      >
         <svg
           ref={svgRef}
           className="canvas-surface absolute inset-0 w-full h-full"
@@ -835,60 +990,37 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
         >
           <defs>
             <marker
-              id="edge-arrow"
-              viewBox="0 0 10 10"
-              refX="9"
-              refY="5"
-              markerWidth={6}
-              markerHeight={6}
-              orient="auto"
-              markerUnits="strokeWidth"
+              id="edge-arrow" viewBox="0 0 10 10" refX="9" refY="5"
+              markerWidth={6} markerHeight={6} orient="auto" markerUnits="strokeWidth"
             >
               <path d="M0,0 L10,5 L0,10 Z" fill="#475569" />
             </marker>
             <marker
-              id="edge-arrow-selected"
-              viewBox="0 0 10 10"
-              refX="9"
-              refY="5"
-              markerWidth={6}
-              markerHeight={6}
-              orient="auto"
-              markerUnits="strokeWidth"
+              id="edge-arrow-selected" viewBox="0 0 10 10" refX="9" refY="5"
+              markerWidth={6} markerHeight={6} orient="auto" markerUnits="strokeWidth"
             >
               <path d="M0,0 L10,5 L0,10 Z" fill="#0ea5e9" />
             </marker>
             <marker
-              id="edge-arrow-preview"
-              viewBox="0 0 10 10"
-              refX="9"
-              refY="5"
-              markerWidth={6}
-              markerHeight={6}
-              orient="auto"
-              markerUnits="strokeWidth"
+              id="edge-arrow-preview" viewBox="0 0 10 10" refX="9" refY="5"
+              markerWidth={6} markerHeight={6} orient="auto" markerUnits="strokeWidth"
             >
               <path d="M0,0 L10,5 L0,10 Z" fill="#6366f1" />
             </marker>
           </defs>
 
           <g transform={`translate(${viewport.tx} ${viewport.ty}) scale(${viewport.scale})`}>
-            {/* Edges */}
             {renderedEdges.map((e) => {
               if (!e) return null;
               const isSel = e.id === selectedEdgeId;
               return (
                 <g key={e.id}>
-                  {/* Wide invisible hit area */}
                   <path
                     d={e.d}
-                    stroke="transparent"
-                    strokeWidth={EDGE_HIT_WIDTH}
-                    fill="none"
+                    stroke="transparent" strokeWidth={EDGE_HIT_WIDTH} fill="none"
                     style={{ cursor: "pointer", touchAction: "none" }}
                     onPointerDown={(ev) => onEdgePointerDown(ev, e.id)}
                   />
-                  {/* Visible stroke */}
                   <path
                     d={e.d}
                     stroke={isSel ? "#0ea5e9" : "#475569"}
@@ -989,7 +1121,15 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
           </g>
         </svg>
 
-        {/* Empty state */}
+        {isDraggingFile && (
+          <div className="absolute inset-0 z-30 bg-indigo-500/10 border-4 border-dashed border-indigo-400 flex items-center justify-center pointer-events-none">
+            <div className="bg-white px-5 py-3 rounded-xl shadow-lg flex items-center gap-2 text-slate-700 font-medium">
+              <Icon name="image" size={20} />
+              Drop image to add
+            </div>
+          </div>
+        )}
+
         {isEmpty && !connectPreview && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
             <div className="text-center text-slate-400 max-w-xs px-6">
@@ -997,7 +1137,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
                 <Icon name="plus" size={24} />
               </div>
               <p className="text-sm font-medium text-slate-600 mb-1">Empty board</p>
-              <p className="text-xs">Tap <b className="font-semibold text-slate-700">+ Shape</b> below, or <b className="font-semibold text-slate-700">Import</b> a mindmap from Claude.</p>
+              <p className="text-xs">Tap <b className="font-semibold text-slate-700">+ Shape</b>, drop an image, or <b className="font-semibold text-slate-700">Import</b> a mindmap.</p>
             </div>
           </div>
         )}
@@ -1014,6 +1154,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
               shape={editing}
               onToggle={(patch) => updateShape(editing.id, patch, { history: false })}
               onBump={(delta) => bumpFontSize(editing.id, delta, { history: false })}
+              onStyle={(s) => applyTextStyle(editing.id, s, { history: false })}
               onDone={() => setEditingId(null)}
             />
           </>
@@ -1025,7 +1166,6 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
           </div>
         )}
 
-        {/* Edge midpoint delete button */}
         {selectedEdgeId && selectedEdgeMid && (
           <button
             onClick={() => deleteEdge(selectedEdgeId)}
@@ -1041,7 +1181,6 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
           </button>
         )}
 
-        {/* Undo / Redo */}
         <div className="absolute left-2 z-20 pointer-events-none" style={{ top: "max(8px, env(safe-area-inset-top))" }}>
           <div className="pointer-events-auto bg-white/95 backdrop-blur border shadow rounded-xl flex">
             <button
@@ -1067,14 +1206,23 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
         </div>
 
         {selected && !editing ? (
-          <Inspector
-            shape={selected}
-            onChange={(patch) => updateShape(selected.id, patch)}
-            onBump={(delta) => bumpFontSize(selected.id, delta)}
-            onDelete={() => deleteShape(selected.id)}
-            onDuplicate={() => duplicateShape(selected.id)}
-            onEditText={() => onShapeDoubleClick(selected.id)}
-          />
+          selected.kind === "image" ? (
+            <ImageInspector
+              shape={selected}
+              onDuplicate={() => duplicateShape(selected.id)}
+              onDelete={() => deleteShape(selected.id)}
+            />
+          ) : (
+            <Inspector
+              shape={selected}
+              onChange={(patch) => updateShape(selected.id, patch)}
+              onBump={(delta) => bumpFontSize(selected.id, delta)}
+              onStyle={(s) => applyTextStyle(selected.id, s)}
+              onDelete={() => deleteShape(selected.id)}
+              onDuplicate={() => duplicateShape(selected.id)}
+              onEditText={() => onShapeDoubleClick(selected.id)}
+            />
+          )
         ) : (
           !editing && (
             <BottomToolbar
@@ -1098,7 +1246,7 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
   );
 }
 
-// ---------- ShapeNode (memoized) ----------
+// ---------- ShapeNode ----------
 
 const ShapeNode = memo(function ShapeNode({
   shape,
@@ -1173,7 +1321,34 @@ const ShapeNode = memo(function ShapeNode({
         style={styleProps}
       />
     );
+  } else if (shape.kind === "image") {
+    geometry = (
+      <g>
+        {shape.src && (
+          <image
+            href={shape.src}
+            x={shape.x} y={shape.y} width={shape.w} height={shape.h}
+            preserveAspectRatio="xMidYMid meet"
+            onPointerDown={handlePointerDown}
+            onDoubleClick={handleDoubleClick}
+            style={styleProps}
+          />
+        )}
+        <rect
+          x={shape.x} y={shape.y} width={shape.w} height={shape.h}
+          rx={6} ry={6}
+          fill={shape.src ? "transparent" : "#f1f5f9"}
+          stroke={selected || connectSource || connectTarget ? strokeColor : "transparent"}
+          strokeWidth={selected || connectSource || connectTarget ? 2.5 : 0}
+          vectorEffect="non-scaling-stroke"
+          onPointerDown={shape.src ? undefined : handlePointerDown}
+          onDoubleClick={shape.src ? undefined : handleDoubleClick}
+          style={shape.src ? { pointerEvents: "none" as const } : styleProps}
+        />
+      </g>
+    );
   } else {
+    // text shape
     geometry = (
       <rect
         x={shape.x} y={shape.y} width={shape.w} height={shape.h}
@@ -1190,6 +1365,14 @@ const ShapeNode = memo(function ShapeNode({
     );
   }
 
+  if (shape.kind === "image") {
+    return <g>{geometry}</g>;
+  }
+
+  const align = effTextAlign(shape);
+  const justify = JUSTIFY[align];
+  const hlBg = shape.highlight ? effHighlightColor(shape) : "transparent";
+
   return (
     <g>
       {geometry}
@@ -1203,11 +1386,11 @@ const ShapeNode = memo(function ShapeNode({
             height: "100%",
             display: "flex",
             alignItems: "center",
-            justifyContent: "center",
+            justifyContent: justify,
             padding: 8,
             boxSizing: "border-box",
             color: "#0f172a",
-            textAlign: "center",
+            textAlign: align,
             lineHeight: 1.25,
             userSelect: "none",
             fontSize: effFontSize(shape),
@@ -1217,19 +1400,37 @@ const ShapeNode = memo(function ShapeNode({
             visibility: editing ? "hidden" : "visible",
           }}
         >
-          <span
-            style={{
-              backgroundColor: shape.highlight ? effHighlightColor(shape) : "transparent",
+          {shape.bullet ? (
+            <div style={{ width: "100%", textAlign: "left" }}>
+              {(shape.text || "").split("\n").map((line, i) => (
+                <div key={i} style={{ display: "flex", gap: "0.45em", alignItems: "baseline" }}>
+                  <span style={{ flexShrink: 0 }}>•</span>
+                  <span style={{
+                    backgroundColor: hlBg,
+                    padding: shape.highlight ? "0 4px" : 0,
+                    borderRadius: shape.highlight ? 3 : 0,
+                    wordBreak: "break-word",
+                    boxDecorationBreak: "clone",
+                    WebkitBoxDecorationBreak: "clone",
+                    flex: 1,
+                    textAlign: "left",
+                  }}>{line || " "}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <span style={{
+              backgroundColor: hlBg,
               padding: shape.highlight ? "2px 6px" : 0,
               borderRadius: shape.highlight ? 4 : 0,
               wordBreak: "break-word",
               maxWidth: "100%",
               boxDecorationBreak: "clone",
               WebkitBoxDecorationBreak: "clone",
-            }}
-          >
-            {shape.text}
-          </span>
+            }}>
+              {shape.text}
+            </span>
+          )}
         </div>
       </foreignObject>
     </g>
@@ -1326,7 +1527,7 @@ function ConnectionDots({
   );
 }
 
-// ---------- TextEditOverlay (contentEditable, span-only highlight) ----------
+// ---------- TextEditOverlay ----------
 
 function TextEditOverlay({
   shape,
@@ -1341,7 +1542,6 @@ function TextEditOverlay({
 }) {
   const spanRef = useRef<HTMLSpanElement>(null);
 
-  // Mount: seed content, focus, select-all.
   useEffect(() => {
     const el = spanRef.current;
     if (!el) return;
@@ -1357,7 +1557,6 @@ function TextEditOverlay({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // External text changes (e.g. undo) — only update if different.
   useEffect(() => {
     const el = spanRef.current;
     if (!el) return;
@@ -1372,6 +1571,7 @@ function TextEditOverlay({
   const height = shape.h * viewport.scale;
   const fontPx = effFontSize(shape) * viewport.scale;
   const isText = shape.kind === "text";
+  const align = effTextAlign(shape);
 
   const containerBg = isText ? "transparent" : shape.fill;
   const borderRadius = shape.kind === "rect" ? 10 * viewport.scale : isText ? 6 * viewport.scale : 0;
@@ -1388,10 +1588,10 @@ function TextEditOverlay({
         height,
         display: "flex",
         alignItems: "center",
-        justifyContent: "center",
+        justifyContent: JUSTIFY[align],
         padding: 8,
         boxSizing: "border-box",
-        textAlign: "center",
+        textAlign: align,
         color: "#0f172a",
         lineHeight: 1.25,
         background: containerBg,
@@ -1414,7 +1614,11 @@ function TextEditOverlay({
           document.execCommand("insertText", false, text);
         }}
         onKeyDown={(e) => {
-          if (e.key === "Escape" || (e.key === "Enter" && !e.shiftKey)) {
+          if (e.key === "Escape") {
+            e.preventDefault();
+            onDone();
+          } else if (e.key === "Enter" && !e.shiftKey && !shape.bullet) {
+            // For bullet shapes, allow Enter to add a new line.
             e.preventDefault();
             onDone();
           }
@@ -1434,13 +1638,14 @@ function TextEditOverlay({
           boxDecorationBreak: "clone",
           WebkitBoxDecorationBreak: "clone",
           caretColor: "#0f172a",
+          textAlign: align,
         }}
       />
     </div>
   );
 }
 
-// ---------- Format toggle helpers ----------
+// ---------- Buttons ----------
 
 function ToggleBtn({
   active,
@@ -1507,17 +1712,114 @@ function IconBtn({
   );
 }
 
+// ---------- Text style row (used by inspector + edit bar) ----------
+
+function TextStyleRow({
+  shape,
+  onStyle,
+  onToggle,
+  preventBlur,
+}: {
+  shape: Shape;
+  onStyle: (s: TextStyleKey) => void;
+  onToggle: (patch: Partial<Shape>) => void;
+  preventBlur?: boolean;
+}) {
+  const current = detectTextStyle(shape);
+  const items: { key: TextStyleKey; icon: IconName; aria: string }[] = [
+    { key: "h1", icon: "heading-1", aria: "Heading 1" },
+    { key: "h2", icon: "heading-2", aria: "Heading 2" },
+    { key: "h3", icon: "heading-3", aria: "Heading 3" },
+    { key: "body", icon: "pilcrow", aria: "Body" },
+  ];
+  return (
+    <div className="flex items-center gap-1">
+      {items.map((it) => (
+        <button
+          key={it.key}
+          onMouseDown={preventBlur ? (e) => e.preventDefault() : undefined}
+          onClick={() => onStyle(it.key)}
+          aria-pressed={current === it.key && !shape.bullet}
+          aria-label={it.aria}
+          title={it.aria}
+          className={`h-11 min-w-11 px-2 rounded-xl flex items-center justify-center ${
+            current === it.key && !shape.bullet ? "bg-slate-900 text-white" : "text-slate-700 hover:bg-slate-100"
+          }`}
+        >
+          <Icon name={it.icon} size={18} />
+        </button>
+      ))}
+      <div className="w-px h-6 bg-slate-200 mx-0.5" />
+      <button
+        onMouseDown={preventBlur ? (e) => e.preventDefault() : undefined}
+        onClick={() =>
+          onToggle({
+            bullet: !shape.bullet,
+            textAlign: !shape.bullet ? "left" : shape.textAlign,
+          })
+        }
+        aria-pressed={!!shape.bullet}
+        aria-label="Bullet list"
+        title="Bullet list"
+        className={`h-11 min-w-11 px-2 rounded-xl flex items-center justify-center ${
+          shape.bullet ? "bg-slate-900 text-white" : "text-slate-700 hover:bg-slate-100"
+        }`}
+      >
+        <Icon name="list" size={18} />
+      </button>
+    </div>
+  );
+}
+
+function AlignRow({
+  shape,
+  onToggle,
+  preventBlur,
+}: {
+  shape: Shape;
+  onToggle: (patch: Partial<Shape>) => void;
+  preventBlur?: boolean;
+}) {
+  const current = effTextAlign(shape);
+  const items: { key: TextAlign; icon: IconName; aria: string }[] = [
+    { key: "left", icon: "align-left", aria: "Align left" },
+    { key: "center", icon: "align-center", aria: "Align center" },
+    { key: "right", icon: "align-right", aria: "Align right" },
+  ];
+  return (
+    <div className="flex items-center gap-1">
+      {items.map((it) => (
+        <button
+          key={it.key}
+          onMouseDown={preventBlur ? (e) => e.preventDefault() : undefined}
+          onClick={() => onToggle({ textAlign: it.key })}
+          aria-pressed={current === it.key}
+          aria-label={it.aria}
+          title={it.aria}
+          className={`h-11 min-w-11 px-2 rounded-xl flex items-center justify-center ${
+            current === it.key ? "bg-slate-900 text-white" : "text-slate-700 hover:bg-slate-100"
+          }`}
+        >
+          <Icon name={it.icon} size={18} />
+        </button>
+      ))}
+    </div>
+  );
+}
+
 // ---------- EditingTopBar ----------
 
 function EditingTopBar({
   shape,
   onToggle,
   onBump,
+  onStyle,
   onDone,
 }: {
   shape: Shape;
   onToggle: (patch: Partial<Shape>) => void;
   onBump: (delta: number) => void;
+  onStyle: (s: TextStyleKey) => void;
   onDone: () => void;
 }) {
   return (
@@ -1543,6 +1845,11 @@ function EditingTopBar({
             <Icon name="check" size={16} />
             Done
           </button>
+        </div>
+        <div className="pointer-events-auto bg-white border shadow-lg rounded-2xl p-1.5 flex items-center gap-1">
+          <TextStyleRow shape={shape} onStyle={onStyle} onToggle={onToggle} preventBlur />
+          <div className="w-px h-6 bg-slate-200 mx-0.5" />
+          <AlignRow shape={shape} onToggle={onToggle} preventBlur />
         </div>
         {shape.highlight && (
           <div className="pointer-events-auto bg-white border shadow-lg rounded-2xl p-1.5 flex items-center gap-1.5">
@@ -1585,6 +1892,7 @@ function BottomToolbar({
     { k: "ellipse", label: "Ellipse", icon: "circle" },
     { k: "diamond", label: "Diamond", icon: "diamond" },
     { k: "text", label: "Text", icon: "type" },
+    { k: "image", label: "Image", icon: "image" },
   ];
   return (
     <div
@@ -1602,10 +1910,10 @@ function BottomToolbar({
               aria-expanded={addOpen}
             >
               <Icon name="plus" size={18} />
-              Shape
+              Add
             </button>
             {addOpen && (
-              <div className="absolute bottom-full mb-2 left-0 bg-white border shadow-lg rounded-xl p-1 flex flex-col w-44 z-20">
+              <div className="absolute bottom-full mb-2 left-0 bg-white border shadow-lg rounded-xl p-1 flex flex-col w-48 z-20">
                 {items.map((it) => (
                   <button
                     key={it.k}
@@ -1642,12 +1950,13 @@ function BottomToolbar({
   );
 }
 
-// ---------- Inspector ----------
+// ---------- Inspector (non-image shapes) ----------
 
 function Inspector({
   shape,
   onChange,
   onBump,
+  onStyle,
   onDelete,
   onDuplicate,
   onEditText,
@@ -1655,6 +1964,7 @@ function Inspector({
   shape: Shape;
   onChange: (p: Partial<Shape>) => void;
   onBump: (delta: number) => void;
+  onStyle: (s: TextStyleKey) => void;
   onDelete: () => void;
   onDuplicate: () => void;
   onEditText: () => void;
@@ -1667,17 +1977,22 @@ function Inspector({
       <div className="flex justify-center">
         <div className="pointer-events-auto bg-white border shadow-lg rounded-2xl p-2 w-full max-w-md flex flex-col gap-2">
           <div className="flex items-center gap-1">
-            <ToggleBtn icon="bold" active={!!shape.bold} onActivate={() => onChange({ bold: !shape.bold })} ariaLabel="Bold" />
-            <ToggleBtn icon="italic" active={!!shape.italic} onActivate={() => onChange({ italic: !shape.italic })} ariaLabel="Italic" />
-            <ToggleBtn icon="highlighter" active={!!shape.highlight} onActivate={() => onChange({ highlight: !shape.highlight })} ariaLabel="Highlight" />
-            <div className="w-px h-6 bg-slate-200 mx-0.5" />
-            <IconBtn icon="a-arrow-down" onClick={() => onBump(-FONT_STEP)} ariaLabel="Smaller text" />
-            <div className="px-1 text-xs text-slate-500 tabular-nums w-8 text-center">{effFontSize(shape)}</div>
-            <IconBtn icon="a-arrow-up" onClick={() => onBump(FONT_STEP)} ariaLabel="Larger text" />
+            <TextStyleRow shape={shape} onStyle={onStyle} onToggle={onChange} />
             <div className="flex-1" />
             <IconBtn icon="pencil" onClick={onEditText} ariaLabel="Edit text" />
             <IconBtn icon="copy" onClick={onDuplicate} ariaLabel="Duplicate" title="Duplicate (Cmd/Ctrl+D)" />
             <IconBtn icon="trash" onClick={onDelete} ariaLabel="Delete shape" variant="danger" />
+          </div>
+          <div className="flex items-center gap-1 flex-wrap">
+            <ToggleBtn icon="bold" active={!!shape.bold} onActivate={() => onChange({ bold: !shape.bold })} ariaLabel="Bold" />
+            <ToggleBtn icon="italic" active={!!shape.italic} onActivate={() => onChange({ italic: !shape.italic })} ariaLabel="Italic" />
+            <ToggleBtn icon="highlighter" active={!!shape.highlight} onActivate={() => onChange({ highlight: !shape.highlight })} ariaLabel="Highlight" />
+            <div className="w-px h-6 bg-slate-200 mx-0.5" />
+            <AlignRow shape={shape} onToggle={onChange} />
+            <div className="w-px h-6 bg-slate-200 mx-0.5" />
+            <IconBtn icon="a-arrow-down" onClick={() => onBump(-FONT_STEP)} ariaLabel="Smaller text" />
+            <div className="px-1 text-xs text-slate-500 tabular-nums w-8 text-center">{effFontSize(shape)}</div>
+            <IconBtn icon="a-arrow-up" onClick={() => onBump(FONT_STEP)} ariaLabel="Larger text" />
           </div>
           <div className="flex items-center gap-1.5 px-1">
             <span className="text-[10px] uppercase tracking-wide text-slate-400 w-8 shrink-0">Fill</span>
@@ -1709,6 +2024,36 @@ function Inspector({
               </div>
             </div>
           )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- ImageInspector ----------
+
+function ImageInspector({
+  onDuplicate,
+  onDelete,
+}: {
+  shape: Shape;
+  onDuplicate: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div
+      className="absolute left-2 right-2 bottom-0 z-10 pointer-events-none"
+      style={{ paddingBottom: "max(8px, env(safe-area-inset-bottom))" }}
+    >
+      <div className="flex justify-center">
+        <div className="pointer-events-auto bg-white border shadow-lg rounded-2xl p-2 flex items-center gap-1">
+          <div className="px-3 text-xs text-slate-500 flex items-center gap-1.5">
+            <Icon name="image" size={14} />
+            Image
+          </div>
+          <div className="w-px h-6 bg-slate-200 mx-0.5" />
+          <IconBtn icon="copy" onClick={onDuplicate} ariaLabel="Duplicate" title="Duplicate (Cmd/Ctrl+D)" />
+          <IconBtn icon="trash" onClick={onDelete} ariaLabel="Delete image" variant="danger" />
         </div>
       </div>
     </div>

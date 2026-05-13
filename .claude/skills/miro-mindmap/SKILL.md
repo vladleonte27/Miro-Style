@@ -18,64 +18,76 @@ Trigger phrases (in chat):
 
 Do **NOT** use this skill for:
 - Adding a mindmap feature to the app (that's a coding task — edit code, do not invoke this skill).
-- Linear lists, tables, prose outlines, or essay drafts (the schema is a tree; if a tree doesn't fit the request, say so).
+- Linear lists, tables, prose outlines, or essay drafts.
+- Image generation. Users add images manually in the app (file picker / drag-drop).
 
-## Schema (exact)
-
-The app's `sanitizeMindmap` accepts exactly:
+## Schema
 
 ```ts
-type Node = { label: string; children?: Node[] };
+type Node = {
+  label: string;                              // required, non-empty
+  style?: "h1" | "h2" | "h3" | "body" | "bullet";   // optional typography preset
+  align?: "left" | "center" | "right";        // optional text alignment
+  children?: Node[];                          // optional sub-nodes
+};
 ```
 
-- `label`: required, non-empty string. App trims to 80 chars.
-- `children`: optional array of Nodes. Missing or `[]` = leaf.
-- **No other keys are read.** Don't add `id`, `description`, `notes`, `color`, etc. They'll be ignored and confuse the user.
+- `label` — required, trimmed to 200 chars by the app.
+- `style` — optional. Defaults are applied by depth if you omit it:
+  - depth 0 (root) → `h1`
+  - depth 1 (top-level branches) → `h2`
+  - depth ≥ 2 → `body`
+- `align` — optional. Defaults: `center`, except `bullet` defaults to `left`.
+- `children` — optional array.
+- **No other keys are read.** Don't add `id`, `notes`, `color`, etc. They'll be ignored.
+
+### Style presets (what each one renders as)
+
+| Style    | Use for                                              | Font     | Weight |
+|----------|------------------------------------------------------|----------|--------|
+| `h1`     | The topic / one big concept                          | 22 px    | Bold   |
+| `h2`     | Section headers (top-level branches)                 | 18 px    | Bold   |
+| `h3`     | Sub-section labels                                   | 16 px    | Bold   |
+| `body`   | Definitions, descriptions, normal text               | 14 px    | Normal |
+| `bullet` | Action items / atomic tasks. Renders with `•` prefix | 14 px    | Normal |
+
+**When to override `style`:**
+- A leaf that's an actionable task → `"style": "bullet"`.
+- A leaf that's a short metric or fact → leave as default `body`.
+- A pillar header that needs to read smaller than its peers → bump to `h3`.
+- Usually you don't need to set `style` at all; the depth defaults are fine.
+
+**When to set `align`:**
+- Almost never. Defaults are right. Set `"left"` only when the content is dense and reads better flush-left.
 
 ## Quality rules
 
-These are what makes the output actually useful instead of a generic blob.
-
 **Shape of the tree**
-- **Root**: the topic itself, 1–5 words, no trailing punctuation, no quotes.
-- **Top-level branches**: aim for **3–6**. Fewer than 3 = the topic is too narrow for a mindmap (write something else). More than 6 = you're listing, not categorizing.
-- **Second level**: 2–5 children per branch.
-- **Third level**: only when it adds real signal. Many great mindmaps stop at two levels. Don't pad.
+- **Root**: the topic itself, 1–5 words, no trailing punctuation.
+- **Top-level branches**: 3–6 of them. Pillars / dimensions of the topic, not details.
+- **Second level**: 2–5 children per branch. Concrete, distinct, parallel in form.
+- **Third level**: only when it adds real signal. Many great mindmaps stop at two levels.
 - Never have a branch with one child — fold it into the parent label.
 
 **Branch selection**
-- Top-level branches should be **MECE-ish**: mostly non-overlapping, together covering the topic. Test: can you defend why these exact branches?
-- Each top-level branch is a **dimension or pillar**, not a detail. ("Pricing" is a branch; "Charge $9/mo" is a leaf.)
-- **Avoid meta-branches** like "Overview", "Introduction", "Conclusion", "Resources", "Other", "Misc" unless the user explicitly asked for them. They're filler.
-- **Parallelism**: siblings should be the same kind of thing.
-  - Bad: `["Vision", "Hire 3 engineers", "Marketing", "Q3 goals"]` — mixes abstraction levels.
-  - Good: `["Product", "Team", "Marketing", "Operations"]`.
-  - Within a branch, all children should be the same kind too (all tactics, or all metrics, or all questions — not mixed).
+- Top-level branches should be MECE-ish: mostly non-overlapping, together covering the topic.
+- Each top-level branch is a dimension or pillar, not a detail.
+- Avoid meta-branches like "Overview", "Conclusion", "Resources" unless the user asks.
+- **Parallelism**: siblings should be the same kind of thing at the same level of abstraction.
 
 **Labels**
-- Max **8 words**, ideally ≤ 6.
+- Max 8 words for `h1`/`h2`/`h3`/`body`. Bullets can go up to ~12 words.
 - Concrete > vague. "Weekly customer interviews" beats "Customer research".
-- Strip articles ("the", "a") where natural.
 - No trailing punctuation, no emojis, no quotes around labels.
-- No filler prefixes like "Different types of…", "How to…", "Why…" — just the noun phrase.
-
-**Tone**
-- Match the user's domain language. Technical user → technical labels.
-- Don't editorialize ("Amazing idea: …"). Just the structure.
+- No filler prefixes ("How to…", "Why…", "Different types of…").
 
 ## Output delivery
 
-1. **One short sentence** before the JSON, framing what you built. (Optional: ask if they want it expanded after.)
-2. **One ```json fenced code block**. Inside the fence: only the JSON object. No comments, no `// ...`, no trailing prose, no ellipses.
+1. **One short sentence** before the JSON, framing what you built.
+2. **One ```json fenced code block**. Inside the fence: only the JSON. No comments, no `// ...`, no trailing prose, no ellipses. Must round-trip through `JSON.parse`.
 3. **One short sentence** after, telling them where to paste: *"Open your board → tap **📋 Import** → paste this in."*
-4. That's it. No bullet recap of branches, no "let me know if…". Keep it tight.
 
-### Format guarantees
-- Valid JSON: `JSON.parse` must accept it. No trailing commas, no single quotes, no comments.
-- Pretty-printed with 2-space indent for readability (the app accepts any whitespace).
-- No non-ASCII characters in labels unless the topic requires them.
-
-## Example
+## Example (with style mixed in)
 
 > **User**: build me a mindmap for launching a meal-prep startup
 
@@ -86,45 +98,51 @@ These are what makes the output actually useful instead of a generic blob.
 > ```json
 > {
 >   "label": "Meal-prep startup launch",
+>   "style": "h1",
 >   "children": [
 >     {
 >       "label": "Product",
+>       "style": "h2",
 >       "children": [
->         { "label": "Weekly menu rotation" },
->         { "label": "Dietary variants (keto, veg)" },
->         { "label": "Packaging & shelf life" }
+>         { "label": "Weekly menu rotation", "style": "bullet" },
+>         { "label": "Dietary variants (keto, veg)", "style": "bullet" },
+>         { "label": "Packaging & shelf life", "style": "bullet" }
 >       ]
 >     },
 >     {
 >       "label": "Operations",
+>       "style": "h2",
 >       "children": [
->         { "label": "Commercial kitchen lease" },
->         { "label": "Cold-chain delivery" },
->         { "label": "Inventory & spoilage tracking" }
+>         { "label": "Commercial kitchen lease", "style": "bullet" },
+>         { "label": "Cold-chain delivery", "style": "bullet" },
+>         { "label": "Inventory & spoilage tracking", "style": "bullet" }
 >       ]
 >     },
 >     {
 >       "label": "Customers",
+>       "style": "h2",
 >       "children": [
->         { "label": "ICP: busy urban professionals" },
->         { "label": "Acquisition: IG + referral" },
->         { "label": "Retention: subscription tiers" }
+>         { "label": "ICP: busy urban professionals", "style": "body" },
+>         { "label": "Acquisition: IG + referral", "style": "bullet" },
+>         { "label": "Retention: subscription tiers", "style": "bullet" }
 >       ]
 >     },
 >     {
 >       "label": "Unit economics",
+>       "style": "h2",
 >       "children": [
->         { "label": "COGS per meal" },
->         { "label": "Delivery cost per order" },
->         { "label": "Target gross margin" }
+>         { "label": "COGS per meal", "style": "body" },
+>         { "label": "Delivery cost per order", "style": "body" },
+>         { "label": "Target gross margin", "style": "body" }
 >       ]
 >     },
 >     {
 >       "label": "Compliance",
+>       "style": "h2",
 >       "children": [
->         { "label": "Food handler permits" },
->         { "label": "Allergen labeling" },
->         { "label": "Liability insurance" }
+>         { "label": "Food handler permits", "style": "bullet" },
+>         { "label": "Allergen labeling", "style": "bullet" },
+>         { "label": "Liability insurance", "style": "bullet" }
 >       ]
 >     }
 >   ]
@@ -133,16 +151,18 @@ These are what makes the output actually useful instead of a generic blob.
 >
 > Open your board → tap **📋 Import** → paste this in.
 
-## Anti-patterns (do not do)
+For most mindmaps, you can omit `style` entirely and let the depth defaults handle it — the example above is verbose only to show what's available. Add `style: "bullet"` to leaves that are action items; add `"h3"` when a pillar needs to read smaller than its siblings.
 
-- ❌ Generating Mermaid, GraphViz, OPML, Markdown bullets, or any other format. JSON only.
-- ❌ Wrapping the JSON in `const data = {...}`, `export default`, or other JS.
-- ❌ Adding fields not in the schema (`id`, `notes`, `color`).
-- ❌ Single-child chains (`A → B → C` where each has only one child). Collapse.
-- ❌ Branches like "Other", "Miscellaneous", "TBD".
-- ❌ Padding to hit a count. 4 strong branches beats 6 with filler.
-- ❌ Asking "what aspects do you care about?" for clearly scoped topics. Just deliver — they can edit on the board.
+## Anti-patterns
+
+- Don't generate Mermaid, GraphViz, OPML, Markdown bullets, or any other format. JSON only.
+- Don't wrap the JSON in `const data = {...}`, `export default`, or any other JS.
+- Don't add fields outside the schema (`id`, `notes`, `color`, `image`, `src`).
+- Don't use `align: "right"` unless the user explicitly asks.
+- Don't single-child chains (`A → B → C` with one kid each). Collapse.
+- Don't pad to hit a count. 4 strong branches beats 6 with filler.
+- Don't ask "what aspects do you care about?" for clearly scoped topics. Just deliver.
 
 ## When to ask before generating
 
-Only ask **one** focusing question when the topic is genuinely too broad to be useful (e.g. "make me a mindmap about technology"). For everything moderately scoped, just produce the JSON.
+Only ask **one** focusing question when the topic is genuinely too broad to be useful (e.g. "make me a mindmap about technology"). For moderately scoped topics, just produce the JSON.

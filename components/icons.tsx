@@ -21,7 +21,16 @@ export type IconName =
   | "copy"
   | "trash"
   | "check"
-  | "x";
+  | "x"
+  | "image"
+  | "align-left"
+  | "align-center"
+  | "align-right"
+  | "heading-1"
+  | "heading-2"
+  | "heading-3"
+  | "pilcrow"
+  | "list";
 
 const PATHS: Record<IconName, ReactNode> = {
   "arrow-left": (
@@ -140,6 +149,76 @@ const PATHS: Record<IconName, ReactNode> = {
     <>
       <path d="M18 6 6 18" />
       <path d="m6 6 12 12" />
+    </>
+  ),
+  image: (
+    <>
+      <rect width="18" height="18" x="3" y="3" rx="2" ry="2" />
+      <circle cx="9" cy="9" r="2" />
+      <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
+    </>
+  ),
+  "align-left": (
+    <>
+      <line x1="21" x2="3" y1="6" y2="6" />
+      <line x1="15" x2="3" y1="12" y2="12" />
+      <line x1="17" x2="3" y1="18" y2="18" />
+    </>
+  ),
+  "align-center": (
+    <>
+      <line x1="21" x2="3" y1="6" y2="6" />
+      <line x1="17" x2="7" y1="12" y2="12" />
+      <line x1="19" x2="5" y1="18" y2="18" />
+    </>
+  ),
+  "align-right": (
+    <>
+      <line x1="21" x2="3" y1="6" y2="6" />
+      <line x1="21" x2="9" y1="12" y2="12" />
+      <line x1="21" x2="7" y1="18" y2="18" />
+    </>
+  ),
+  "heading-1": (
+    <>
+      <path d="M4 12h8" />
+      <path d="M4 18V6" />
+      <path d="M12 18V6" />
+      <path d="m17 12 3-2v8" />
+    </>
+  ),
+  "heading-2": (
+    <>
+      <path d="M4 12h8" />
+      <path d="M4 18V6" />
+      <path d="M12 18V6" />
+      <path d="M21 18h-4c0-4 4-3 4-6 0-1.5-2-2.5-4-1" />
+    </>
+  ),
+  "heading-3": (
+    <>
+      <path d="M4 12h8" />
+      <path d="M4 18V6" />
+      <path d="M12 18V6" />
+      <path d="M17.5 10.5c1.7-1 3.5 0 3.5 1.5a2 2 0 0 1-2 2" />
+      <path d="M17 17.5c2 1.5 4 .3 4-1.5a2 2 0 0 0-2-2" />
+    </>
+  ),
+  pilcrow: (
+    <>
+      <path d="M13 4v16" />
+      <path d="M17 4v16" />
+      <path d="M19 4H9.5a4.5 4.5 0 0 0 0 9H13" />
+    </>
+  ),
+  list: (
+    <>
+      <path d="M3 12h.01" />
+      <path d="M3 18h.01" />
+      <path d="M3 6h.01" />
+      <path d="M8 6h13" />
+      <path d="M8 12h13" />
+      <path d="M8 18h13" />
     </>
   ),
 };
