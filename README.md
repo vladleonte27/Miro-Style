@@ -27,10 +27,14 @@ Visit `http://localhost:3000`.
 
 ## Deploy on Vercel
 
-1. Push this branch to GitHub (already done if Claude just pushed it).
-2. Import the repo on [vercel.com/new](https://vercel.com/new) and pick this branch.
-3. Add an env var: `ANTHROPIC_API_KEY`.
-4. Deploy — Vercel auto-detects Next.js, no extra config needed.
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fvladleonte27%2Fmiro-style&env=ANTHROPIC_API_KEY&envDescription=Anthropic+API+key+used+for+AI+mindmap+generation&envLink=https%3A%2F%2Fconsole.anthropic.com%2Fsettings%2Fkeys&project-name=miro-style&repository-name=miro-style)
+
+One-click deploy:
+
+1. Click the button above (or open [vercel.com/new](https://vercel.com/new) and import `vladleonte27/miro-style`).
+2. Pick branch `claude/miro-shapes-ai-mindmap-FAKnJ` (or whichever is current).
+3. Paste your Anthropic key into the `ANTHROPIC_API_KEY` field.
+4. Deploy — Next.js auto-detected, no other config needed.
 
 ## How to use
 
