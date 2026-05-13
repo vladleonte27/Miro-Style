@@ -348,7 +348,10 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
   );
 
   const pushHistory = useCallback((snap: Snapshot) => {
-    if (snap.shapes === shapesRef.current && snap.edges === edgesRef.current) return;
+    // Always push. Direct callers (delete/duplicate/format/etc.) snapshot
+    // BEFORE mutating state, so at this moment snap === current. The drag
+    // commit path dedups itself via the drag's "moved" flag, and undo()
+    // skips any no-op snapshots that slip through.
     historyRef.current.push(snap);
     if (historyRef.current.length > HISTORY_LIMIT) historyRef.current.shift();
     futureRef.current = [];
@@ -570,10 +573,10 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
       });
     }
 
-    function commitPreDrag() {
+    function commitPreDrag(changed: boolean) {
       const pre = preDragRef.current;
       preDragRef.current = null;
-      if (!pre) return;
+      if (!pre || !changed) return;
       pushHistory(pre);
     }
 
@@ -601,21 +604,22 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
             }
           }
         }
+        let edgeCreated = false;
         if (targetId && toAnchor) {
           const fromId = d.fromId;
           const fromAnchor = d.fromAnchor;
           const finalToId = targetId;
           const finalToAnchor = toAnchor;
-          setEdges((es) =>
-            es.some((x) => x.from === fromId && x.to === finalToId)
-              ? es
-              : [...es, { id: newId("e_"), from: fromId, to: finalToId, fromAnchor, toAnchor: finalToAnchor }],
-          );
+          setEdges((es) => {
+            if (es.some((x) => x.from === fromId && x.to === finalToId)) return es;
+            edgeCreated = true;
+            return [...es, { id: newId("e_"), from: fromId, to: finalToId, fromAnchor, toAnchor: finalToAnchor }];
+          });
         }
         setConnectPreview(null);
         dragRef.current = { kind: "none" };
         pointersRef.current.delete(e.pointerId);
-        commitPreDrag();
+        commitPreDrag(edgeCreated);
         return;
       }
       pointersRef.current.delete(e.pointerId);
@@ -631,11 +635,14 @@ export default function BoardEditor({ boardId }: { boardId: string }) {
           setSelectedIds(d.ids);
         }
         setSnapGuides({ x: null, y: null });
-        commitPreDrag();
+        commitPreDrag(d.moved);
       }
       if (d.kind === "resize") {
         setSnapGuides({ x: null, y: null });
-        commitPreDrag();
+        // Resize drags always start at the original shape; assume any
+        // committed handle release was a resize. Undo's skip-no-op handles
+        // the degenerate "click without drag" case.
+        commitPreDrag(true);
       }
       if (d.kind === "marquee") {
         setMarquee(null);

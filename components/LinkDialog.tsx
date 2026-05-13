@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Icon } from "./icons";
 
 export interface LinkPreview {
@@ -77,46 +77,66 @@ interface Props {
   onCommit: (preview: LinkPreview) => void;
 }
 
+function validUrl(s: string): URL | null {
+  const trimmed = s.trim();
+  if (!trimmed) return null;
+  try {
+    let candidate = trimmed;
+    if (!/^https?:\/\//i.test(candidate)) candidate = "https://" + candidate;
+    const u = new URL(candidate);
+    if (!["http:", "https:"].includes(u.protocol)) return null;
+    return u;
+  } catch {
+    return null;
+  }
+}
+
 export default function LinkDialog({ open, onClose, onCommit }: Props) {
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [preview, setPreview] = useState<LinkPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  if (!open) return null;
-
-  function validUrl(s: string): URL | null {
-    const trimmed = s.trim();
-    if (!trimmed) return null;
-    try {
-      let candidate = trimmed;
-      if (!/^https?:\/\//i.test(candidate)) candidate = "https://" + candidate;
-      const u = new URL(candidate);
-      if (!["http:", "https:"].includes(u.protocol)) return null;
-      return u;
-    } catch {
-      return null;
-    }
-  }
-
-  async function load() {
-    const u = validUrl(url);
-    if (!u) {
-      setError("That doesn't look like a valid URL.");
+  // Auto-fetch preview as the user types/pastes a URL (600ms debounce).
+  useEffect(() => {
+    if (!open) return;
+    const trimmed = url.trim();
+    if (!trimmed) {
+      setPreview(null);
+      setLoading(false);
       return;
     }
-    setError(null);
-    setLoading(true);
-    setPreview(null);
-    try {
-      const p = await fetchLinkPreview(u.href);
-      setPreview(p);
-    } catch {
-      setError("Couldn't fetch a preview. You can still add the link.");
-    } finally {
+    const u = validUrl(trimmed);
+    if (!u) {
+      setPreview(null);
       setLoading(false);
+      return;
     }
-  }
+    setPreview(null);
+    setLoading(true);
+    setError(null);
+    let cancelled = false;
+    const t = setTimeout(() => {
+      fetchLinkPreview(u.href)
+        .then((p) => {
+          if (cancelled) return;
+          setPreview(p);
+        })
+        .catch(() => {
+          if (cancelled) return;
+        })
+        .finally(() => {
+          if (cancelled) return;
+          setLoading(false);
+        });
+    }, 600);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [url, open]);
+
+  if (!open) return null;
 
   async function paste() {
     try {
@@ -128,14 +148,23 @@ export default function LinkDialog({ open, onClose, onCommit }: Props) {
     }
   }
 
-  function commit() {
+  async function commit() {
     const u = validUrl(url);
     if (!u) {
       setError("That doesn't look like a valid URL.");
       return;
     }
-    if (preview) {
-      onCommit(preview);
+    let p = preview;
+    if (!p) {
+      // No preview cached yet — fetch inline so the card lands with a thumbnail.
+      setLoading(true);
+      try {
+        p = await fetchLinkPreview(u.href);
+      } catch {}
+      setLoading(false);
+    }
+    if (p) {
+      onCommit(p);
     } else {
       onCommit({
         href: u.href,
@@ -180,7 +209,7 @@ export default function LinkDialog({ open, onClose, onCommit }: Props) {
           <input
             value={url}
             onChange={(e) => { setUrl(e.target.value); setPreview(null); setError(null); }}
-            onKeyDown={(e) => { if (e.key === "Enter") load(); }}
+            onKeyDown={(e) => { if (e.key === "Enter") commit(); }}
             placeholder="https://…"
             className="flex-1 border rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900"
             autoFocus
@@ -222,22 +251,13 @@ export default function LinkDialog({ open, onClose, onCommit }: Props) {
         </div>
 
         <div className="flex gap-2 mt-4">
-          {!preview && !loading && (
-            <button
-              onClick={load}
-              disabled={!url.trim()}
-              className="flex-1 px-4 py-3 text-sm rounded-lg bg-slate-100 hover:bg-slate-200 font-medium disabled:opacity-50"
-            >
-              Fetch preview
-            </button>
-          )}
           <button
             onClick={commit}
-            disabled={!url.trim()}
+            disabled={!url.trim() || loading}
             className="flex-1 px-4 py-3 text-sm rounded-lg bg-slate-900 text-white disabled:opacity-50 font-medium flex items-center justify-center gap-2"
           >
             <Icon name="check" size={18} />
-            Add to board
+            {loading ? "Loading preview…" : "Add to board"}
           </button>
         </div>
       </div>
